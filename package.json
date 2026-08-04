@@ -11,7 +11,8 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "probe": "tsx --env-file-if-exists=.env.local scripts/probe.ts"
+    "probe": "tsx --env-file-if-exists=.env.local scripts/probe.ts",
+    "crawl": "tsx scripts/crawl.ts"
   },
   "dependencies": {
     "neo4j-driver": "^5.28.3",

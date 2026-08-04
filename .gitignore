@@ -34,6 +34,11 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Raw upstream responses from the crawler. ~190 MB, and not needed by anyone:
+# data/graph.json is the committed artifact that `npm run seed` reads, so a
+# reviewer can seed with no network access. The cache only speeds up re-crawling.
+/data/cache/
+
 # vercel
 .vercel
 
