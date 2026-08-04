@@ -18,6 +18,7 @@ import {
   StatTile,
   formatCount,
 } from "@/components/primitives";
+import { Pagination, paginate } from "@/components/pagination";
 
 export const revalidate = 60;
 
@@ -30,7 +31,12 @@ export const revalidate = 60;
  * anything wrong — it is about how much implicit trust a dependency tree hands to
  * people its owners have never heard of.
  */
-export default function MaintainersPage() {
+// Two independent lists on one page, so each needs its own search param.
+const TRUST_PAGE_SIZE = 25;
+const SOLE_PAGE_SIZE = 25;
+
+export default async function MaintainersPage({ searchParams }: PageProps<"/maintainers">) {
+  const params = await searchParams;
   return (
     <div className="space-y-6">
       <div>
@@ -43,17 +49,17 @@ export default function MaintainersPage() {
       </div>
 
       <Suspense fallback={<TrustSkeleton />}>
-        <Trust />
+        <Trust params={params} />
       </Suspense>
 
       <Suspense fallback={<PanelSkeleton title="Bus factor of one" rows={8} />}>
-        <SoleMaintainers />
+        <SoleMaintainers params={params} />
       </Suspense>
     </div>
   );
 }
 
-async function Trust() {
+async function Trust({ params }: { params: Record<string, string | string[] | undefined> }) {
   return withDbFallback(
     "trust concentration",
     async () => {
@@ -72,6 +78,7 @@ async function Trust() {
       const summary = summariseTrust(rows, totals.packages);
       const transitiveOnly = rows.filter((row) => row.entirelyTransitive).length;
       const deep = rows.filter((row) => row.minDepth >= 4).length;
+      const page = paginate(rows, params.trust as string | undefined, TRUST_PAGE_SIZE);
 
       return (
         <div className="space-y-6">
@@ -95,15 +102,17 @@ async function Trust() {
             description="Packages counted are only those some application actually installs. Depth range shows how close to, and how far from, a declared dependency their code sits."
           >
             <ul className="divide-y divide-line">
-              {rows.slice(0, 40).map((row) => (
+              {page.items.map((row) => (
                 <TrustRowView key={row.npmUser} row={row} />
               ))}
             </ul>
-            {rows.length > 40 && (
-              <p className="border-t border-line px-5 py-3 text-xs text-ink-faint">
-                Showing the 40 accounts with the widest reach, of {rows.length} total.
-              </p>
-            )}
+            <Pagination
+              page={page}
+              basePath="/maintainers"
+              param="trust"
+              searchParams={params}
+              label="accounts"
+            />
           </Panel>
         </div>
       );
@@ -169,11 +178,13 @@ function TrustRowView({ row }: { row: TrustRow }) {
   );
 }
 
-async function SoleMaintainers() {
+async function SoleMaintainers({ params }: { params: Record<string, string | string[] | undefined> }) {
   return withDbFallback(
     "sole maintainers",
     getSoleMaintainers,
-    (rows) => (
+    (rows) => {
+      const page = paginate(rows, params.sole as string | undefined, SOLE_PAGE_SIZE);
+      return (
       <Panel
         title="Bus factor of one"
         description={
@@ -186,18 +197,23 @@ async function SoleMaintainers() {
           <EmptyState title="No single-maintainer packages" />
         ) : (
           <ul className="divide-y divide-line">
-            {rows.slice(0, 25).map((row) => (
+            {page.items.map((row) => (
               <SoleRow key={row.packageName} row={row} />
             ))}
           </ul>
         )}
-        {rows.length > 25 && (
-          <p className="border-t border-line px-5 py-3 text-xs text-ink-faint">
-            Showing the 25 most-downloaded, of {rows.length} total.
-          </p>
+        {rows.length > 0 && (
+          <Pagination
+            page={page}
+            basePath="/maintainers"
+            param="sole"
+            searchParams={params}
+            label="single-maintainer packages"
+          />
         )}
       </Panel>
-    ),
+      );
+    },
   );
 }
 

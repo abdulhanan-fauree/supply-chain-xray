@@ -107,14 +107,18 @@ export default async function AppDetailPage({ params }: PageProps<"/apps/[slug]"
         <Findings slug={slug} appName={header.name} />
       </Suspense>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Suspense fallback={<PanelSkeleton title="Where the tree sits" rows={7} />}>
-          <DepthPanel slug={slug} total={header.totalDeps} />
-        </Suspense>
-        <Suspense fallback={<PanelSkeleton title="License obligations" rows={3} />}>
-          <LicensePanel slug={slug} appName={header.name} />
-        </Suspense>
-      </div>
+      {/*
+        Stacked rather than side by side. In a half-width column the license
+        chains — four links deep for a sharp binary pulled in through Next.js —
+        overflowed their container and read as truncated, and the depth histogram
+        is a horizontal bar chart that wants the width anyway.
+      */}
+      <Suspense fallback={<PanelSkeleton title="Where the tree sits" rows={7} />}>
+        <DepthPanel slug={slug} total={header.totalDeps} />
+      </Suspense>
+      <Suspense fallback={<PanelSkeleton title="License obligations" rows={3} />}>
+        <LicensePanel slug={slug} appName={header.name} />
+      </Suspense>
     </div>
   );
 }

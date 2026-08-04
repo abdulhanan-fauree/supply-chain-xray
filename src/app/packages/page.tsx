@@ -11,6 +11,7 @@ import {
   StatTile,
   formatCount,
 } from "@/components/primitives";
+import { Pagination, paginate } from "@/components/pagination";
 
 export const revalidate = 60;
 
@@ -24,7 +25,10 @@ export const revalidate = 60;
  * results. The interesting rows are the ones where minimum depth is greater than
  * one, because nobody reviewed those and nobody would notice them changing.
  */
-export default function PackagesPage() {
+const PAGE_SIZE = 30;
+
+export default async function PackagesPage({ searchParams }: PageProps<"/packages">) {
+  const params = await searchParams;
   return (
     <div className="space-y-6">
       <div>
@@ -37,13 +41,13 @@ export default function PackagesPage() {
       </div>
 
       <Suspense fallback={<ListSkeleton />}>
-        <List />
+        <List params={params} />
       </Suspense>
     </div>
   );
 }
 
-async function List() {
+async function List({ params }: { params: Record<string, string | string[] | undefined> }) {
   return withDbFallback(
     "choke points",
     () => getChokePoints(2),
@@ -61,6 +65,7 @@ async function List() {
       const undeclared = rows.filter((row) => row.neverDeclared);
       const allSix = rows.filter((row) => row.appsReached >= 6);
       const vulnerable = rows.filter((row) => row.advisories > 0);
+      const page = paginate(rows, params.page as string | undefined, PAGE_SIZE);
 
       return (
         <div className="space-y-6">
@@ -84,10 +89,16 @@ async function List() {
             description="Ranked by how many applications reach them. Depth is the shallowest hop count across those applications."
           >
             <ul className="divide-y divide-line">
-              {rows.map((row) => (
+              {page.items.map((row) => (
                 <Row key={row.name} row={row} />
               ))}
             </ul>
+            <Pagination
+              page={page}
+              basePath="/packages"
+              searchParams={params}
+              label="shared packages"
+            />
           </Panel>
         </div>
       );

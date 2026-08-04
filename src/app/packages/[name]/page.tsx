@@ -19,6 +19,7 @@ import {
   StatTile,
   formatCount,
 } from "@/components/primitives";
+import { Pagination, paginate } from "@/components/pagination";
 
 export const revalidate = 60;
 
@@ -30,8 +31,14 @@ export const revalidate = 60;
  * directions means either a second index on the dependency table or a full scan,
  * and the graph gets it from the same edges either way.
  */
-export default async function PackagePage({ params }: PageProps<"/packages/[name]">) {
+const DEPENDENTS_PAGE_SIZE = 25;
+
+export default async function PackagePage({
+  params,
+  searchParams,
+}: PageProps<"/packages/[name]">) {
   const { name } = await params;
+  const query = await searchParams;
   const decoded = decodeURIComponent(name);
 
   let pkg;
@@ -129,7 +136,7 @@ export default async function PackagePage({ params }: PageProps<"/packages/[name
       </Suspense>
 
       <Suspense fallback={<PanelSkeleton title="What pulls this in" rows={6} />}>
-        <Dependents name={decoded} />
+        <Dependents name={decoded} query={query} />
       </Suspense>
     </div>
   );
@@ -214,11 +221,19 @@ function VersionRow({ version }: { version: InstalledVersion }) {
   );
 }
 
-async function Dependents({ name }: { name: string }) {
+async function Dependents({
+  name,
+  query,
+}: {
+  name: string;
+  query: Record<string, string | string[] | undefined>;
+}) {
   return withDbFallback(
     "dependents",
     () => getDependents(name),
-    (dependents) => (
+    (dependents) => {
+      const page = paginate(dependents, query.page as string | undefined, DEPENDENTS_PAGE_SIZE);
+      return (
       <Panel
         title="What pulls this in"
         description={
@@ -232,17 +247,26 @@ async function Dependents({ name }: { name: string }) {
             Every application that installs this package declared it in its own manifest.
           </EmptyState>
         ) : (
-          <ul className="divide-y divide-line">
-            {dependents.map((dependent) => (
-              <DependentRow
-                key={`${dependent.versionId}-${dependent.resolvesTo}`}
-                dependent={dependent}
-              />
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y divide-line">
+              {page.items.map((dependent) => (
+                <DependentRow
+                  key={`${dependent.versionId}-${dependent.resolvesTo}`}
+                  dependent={dependent}
+                />
+              ))}
+            </ul>
+            <Pagination
+              page={page}
+              basePath={`/packages/${encodeURIComponent(name)}`}
+              searchParams={query}
+              label="dependents"
+            />
+          </>
         )}
       </Panel>
-    ),
+      );
+    },
   );
 }
 

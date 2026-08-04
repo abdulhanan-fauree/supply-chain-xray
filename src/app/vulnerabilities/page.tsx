@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { getVulnerabilityList, type VulnerabilityListRow } from "@/lib/queries/vulnerabilities";
 import { withDbFallback } from "@/components/db-error";
 import { EmptyState, Panel, SeverityBadge, Skeleton } from "@/components/primitives";
+import { Pagination, paginate } from "@/components/pagination";
 
 export const revalidate = 60;
 
@@ -13,7 +14,12 @@ export const revalidate = 60;
  * is a bigger problem than a CRITICAL in one abandoned service, and sorting by
  * severity would bury it.
  */
-export default function VulnerabilitiesPage() {
+const PAGE_SIZE = 25;
+
+export default async function VulnerabilitiesPage({
+  searchParams,
+}: PageProps<"/vulnerabilities">) {
+  const params = await searchParams;
   return (
     <div className="space-y-6">
       <div>
@@ -26,13 +32,13 @@ export default function VulnerabilitiesPage() {
       </div>
 
       <Suspense fallback={<ListSkeleton />}>
-        <List />
+        <List params={params} />
       </Suspense>
     </div>
   );
 }
 
-async function List() {
+async function List({ params }: { params: Record<string, string | string[] | undefined> }) {
   return withDbFallback("advisory list", getVulnerabilityList, (rows) => {
     if (rows.length === 0) {
       return (
@@ -57,13 +63,21 @@ async function List() {
         ? `${rows.length} reaching production trees. ${multiApp} touch more than one application; ${direct} sit in a dependency somebody declared directly.`
         : `${rows.length} reaching production trees, ${direct} of them in a dependency somebody declared directly. None spans two applications: the vulnerable versions here are pinned old releases specific to one app, while the packages several apps share are all current.`;
 
+    const page = paginate(rows, params.page as string | undefined, PAGE_SIZE);
+
     return (
       <Panel title="Advisories" description={description}>
         <ul className="divide-y divide-line">
-          {rows.map((row) => (
+          {page.items.map((row) => (
             <Row key={row.osvId} row={row} />
           ))}
         </ul>
+        <Pagination
+          page={page}
+          basePath="/vulnerabilities"
+          searchParams={params}
+          label="advisories"
+        />
       </Panel>
     );
   });
