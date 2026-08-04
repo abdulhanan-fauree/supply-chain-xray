@@ -150,16 +150,63 @@ export function normaliseLicense(doc: VersionDoc | null): string {
  * Apache-2.0 one is not.
  */
 export function categoriseLicense(spdxId: string): LicenseCategory {
-  const id = spdxId.toUpperCase();
-  if (id === "UNKNOWN" || id === "" || id === "SEE LICENSE IN LICENSE") return "unknown";
+  const id = spdxId.trim().toUpperCase().replace(/^\(|\)$/g, "");
+  if (id === "UNKNOWN" || id === "" || /^SEE LICENSE/.test(id)) return "unknown";
+
+  // SPDX expressions have to be decomposed, not pattern-matched whole.
+  //
+  // "(BSD-3-Clause OR GPL-2.0)" is a *choice*: the licensee may take the BSD
+  // side and incur no copyleft obligation at all, so the permissive reading is
+  // the correct one. Matching the raw string would have flagged node-forge as
+  // copyleft in every license report this app produces — a false positive in
+  // the direction that wastes a lawyer's afternoon.
+  //
+  // "AND" is the opposite: every listed license binds simultaneously, so the
+  // most restrictive operand governs.
+  // Operators must be whitespace-delimited, not word-boundary-delimited: a
+  // hyphen counts as a word boundary, so \bOR\b happily matches the "or" inside
+  // "LGPL-3.0-or-later" and shreds it into "LGPL-3.0-" and "-later", both
+  // unrecognisable. That silently downgraded every LGPL dependency to "unknown".
+  if (/\s+OR\s+/.test(id)) {
+    return leastRestrictive(id.split(/\s+OR\s+/).map(categoriseLicense));
+  }
+  if (/\s+AND\s+/.test(id)) {
+    return mostRestrictive(id.split(/\s+AND\s+/).map(categoriseLicense));
+  }
+
   if (/AGPL/.test(id)) return "network-copyleft";
-  if (/(^|[^L])GPL-[23]/.test(id) && !/LGPL/.test(id)) return "copyleft";
-  if (/LGPL|MPL|EPL|CDDL|EUPL/.test(id)) return "weak-copyleft";
+  if (/LGPL/.test(id)) return "weak-copyleft";
+  if (/GPL-[23]/.test(id)) return "copyleft";
+  if (/MPL|EPL|CDDL|EUPL|OSL/.test(id)) return "weak-copyleft";
   if (/UNLICENSED|PROPRIETARY|COMMERCIAL/.test(id)) return "proprietary";
-  if (/MIT|APACHE|BSD|ISC|UNLICENSE|CC0|0BSD|WTFPL|ZLIB|PYTHON|ARTISTIC|BLUEOAK/.test(id)) {
+  // CC-BY requires attribution but imposes no source obligation, so for the
+  // purpose of "may I ship this", it belongs with the permissive licenses.
+  if (/MIT|APACHE|BSD|ISC|UNLICENSE|CC0|CC-BY|WTFPL|ZLIB|PYTHON|ARTISTIC|BLUEOAK|POSTGRE/.test(id)) {
     return "permissive";
   }
   return "unknown";
+}
+
+/** Obligation strength, weakest first. */
+const RESTRICTIVENESS: LicenseCategory[] = [
+  "permissive",
+  "unknown",
+  "weak-copyleft",
+  "copyleft",
+  "network-copyleft",
+  "proprietary",
+];
+
+function leastRestrictive(categories: LicenseCategory[]): LicenseCategory {
+  return categories.reduce((best, next) =>
+    RESTRICTIVENESS.indexOf(next) < RESTRICTIVENESS.indexOf(best) ? next : best,
+  );
+}
+
+function mostRestrictive(categories: LicenseCategory[]): LicenseCategory {
+  return categories.reduce((worst, next) =>
+    RESTRICTIVENESS.indexOf(next) > RESTRICTIVENESS.indexOf(worst) ? next : worst,
+  );
 }
 
 /** Pull host/owner/name out of the many forms npm accepts for `repository`. */

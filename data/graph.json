@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-04T21:13:27.306Z",
+  "generatedAt": "2026-08-04T22:49:22.493Z",
   "stats": {
     "packages": 1019,
     "versions": 1234,
@@ -21568,7 +21568,7 @@
     },
     {
       "spdxId": "(BSD-3-Clause OR GPL-2.0)",
-      "category": "copyleft"
+      "category": "permissive"
     },
     {
       "spdxId": "(MIT OR Apache-2.0)",
@@ -21612,7 +21612,7 @@
     },
     {
       "spdxId": "CC-BY-4.0",
-      "category": "unknown"
+      "category": "permissive"
     },
     {
       "spdxId": "ISC",

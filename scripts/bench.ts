@@ -10,6 +10,14 @@
  */
 
 import { getGraphTotals, getPortfolio } from "../src/lib/queries/portfolio";
+import {
+  getAppHeader,
+  getBlastRadius,
+  getDepthHistogram,
+  getLicenseObligations,
+  type AppHeader,
+  type BlastRadiusEntry,
+} from "../src/lib/queries/app-detail";
 import { closeDriver, DbError } from "../src/lib/db";
 import { describeConnection, requireEnv } from "../src/lib/env";
 
@@ -35,6 +43,54 @@ const cases: Case[] = [
             `${row.slug}(${row.totalDeps}d/${row.nestingDepth}deep/${row.longestChain}chain/${row.advisories}v)`,
         )
         .join(" ");
+    },
+  },
+  {
+    // legacy-admin is the worst case by a wide margin: 207 dependencies, 29 of
+    // them vulnerable, 102 advisories. If the detail page is fast for this app
+    // it is fast for all of them.
+    name: "App header (legacy-admin)",
+    run: () => getAppHeader("legacy-admin"),
+    summarise: (r) => {
+      const h = r as AppHeader | null;
+      return h ? `${h.directDeps} direct, ${h.totalDeps} total, ${h.nestingDepth} deep` : "not found";
+    },
+  },
+  {
+    name: "Blast radius (legacy-admin)",
+    run: () => getBlastRadius("legacy-admin"),
+    summarise: (r) => {
+      const rows = r as BlastRadiusEntry[];
+      const deepest = rows.reduce<BlastRadiusEntry | null>(
+        (worst, row) => (!worst || row.depth > worst.depth ? row : worst),
+        null,
+      );
+      return `${rows.length} findings; deepest ${deepest?.depth ?? 0} hops: ${
+        deepest?.chain.join(" -> ") ?? "none"
+      }`;
+    },
+  },
+  {
+    name: "Blast radius (storefront)",
+    run: () => getBlastRadius("storefront-web"),
+    summarise: (r) => `${(r as BlastRadiusEntry[]).length} findings`,
+  },
+  {
+    name: "Depth histogram",
+    run: () => getDepthHistogram("mobile-companion"),
+    summarise: (r) =>
+      (r as Awaited<ReturnType<typeof getDepthHistogram>>)
+        .map((b) => `L${b.depth}:${b.count}`)
+        .join(" "),
+  },
+  {
+    name: "License obligations",
+    run: () => getLicenseObligations("mobile-companion"),
+    summarise: (r) => {
+      const rows = r as Awaited<ReturnType<typeof getLicenseObligations>>;
+      return rows.length
+        ? rows.map((f) => `${f.packageName}(${f.spdxId}@${f.depth})`).slice(0, 4).join(" ")
+        : "clean";
     },
   },
 ];
