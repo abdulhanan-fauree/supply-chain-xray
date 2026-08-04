@@ -1,0 +1,8 @@
+[
+  {
+    "from": "metro-source-map@0.81.5",
+    "name": "@babel/traverse--for-generate-function-map",
+    "range": "npm:@babel/traverse@^7.25.3",
+    "reason": "non-registry range"
+  }
+]
