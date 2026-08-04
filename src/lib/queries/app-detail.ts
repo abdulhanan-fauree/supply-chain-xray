@@ -432,3 +432,12 @@ const APP_SLUGS = `MATCH (app:App) RETURN app.slug AS slug ORDER BY slug`;
 export async function getAppSlugs(): Promise<string[]> {
   return read(APP_SLUGS, {}, (record) => record.slug as string);
 }
+
+/** See the note on PORTFOLIO_CYPHER: the /queries page renders what actually runs. */
+export const APP_DETAIL_CYPHER = {
+  APP_HEADER,
+  VULNERABLE_PATHS,
+  VULNERABLE_VERSIONS,
+  DEPTH_HISTOGRAM,
+  LICENSE_OBLIGATIONS,
+};

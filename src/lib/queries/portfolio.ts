@@ -185,3 +185,9 @@ export async function getGraphTotals(): Promise<GraphTotals> {
   }));
   return rows[0] ?? { packages: 0, versions: 0, dependencies: 0, maintainers: 0, advisories: 0 };
 }
+
+/**
+ * Exported so the /queries page renders the exact text that runs, rather than a
+ * transcription of it that quietly drifts out of date.
+ */
+export const PORTFOLIO_CYPHER = { PORTFOLIO, LONGEST_CHAIN, TOTALS };
