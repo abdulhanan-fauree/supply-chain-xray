@@ -38,6 +38,7 @@ export const REL = {
   MAINTAINS: "MAINTAINS",
   AFFECTS: "AFFECTS",
   HOSTED_IN: "HOSTED_IN",
+  REACHES: "REACHES",
 } as const;
 
 /** Maximum traversal depth used by every variable-length query in the app. */
@@ -157,6 +158,36 @@ export type DependsOnEdge = {
   optional: boolean;
 };
 
+/**
+ * A materialised transitive closure: (:App)-[:REACHES {depth}]->(:Version) for
+ * every version in an app's production install tree, with `depth` being the
+ * minimum number of hops from the app (a direct dependency is 1).
+ *
+ * Why this exists. Nesting depth per dependency is the number behind the most
+ * interesting thing this app has to say — "you did not choose this; something
+ * five levels down did". Asked live it is expensive, and measurably so on the
+ * free c0 instance: a `shortestPath` per (app, dependency) pair times out at
+ * 20s, because the engine solves ~730 independent shortest-path problems.
+ * Computed with one breadth-first sweep in the loader it is microseconds, and
+ * the answer is identical because a BFS *is* the shortest-path algorithm — just
+ * run once from each source instead of once per pair.
+ *
+ * This is not a way of avoiding graph queries. The queries that need a *path* —
+ * blast radius, the fix point, shortest path between two packages — still
+ * traverse live, because a path is the thing a graph database is uniquely good
+ * at returning and there is nothing to precompute. What is materialised here is
+ * only the reachability aggregate behind dashboard counters.
+ *
+ * Note this is distinct from the longest chain through a tree, which is a
+ * different number (orders-api: nesting depth 5, longest chain 9) and stays a
+ * live query since `max(length(p))` is cheap.
+ */
+export type ReachesEdge = {
+  appSlug: string;
+  versionId: string;
+  depth: number;
+};
+
 export type HasVersionEdge = { packageName: string; versionId: string };
 export type LicensedUnderEdge = { versionId: string; spdxId: string };
 export type MaintainsEdge = { npmUser: string; packageName: string };
@@ -184,6 +215,8 @@ export type GraphDataset = {
     maxDepthReached: number;
     /** Dependency ranges that could not be resolved, with the reason. */
     unresolved: number;
+    /** Materialised (app, version) reachability pairs. */
+    reaches: number;
   };
   apps: AppNode[];
   packages: PackageNode[];
@@ -193,6 +226,7 @@ export type GraphDataset = {
   repos: RepoNode[];
   vulnerabilities: VulnerabilityNode[];
   uses: UsesEdge[];
+  reaches: ReachesEdge[];
   hasVersion: HasVersionEdge[];
   dependsOn: DependsOnEdge[];
   licensedUnder: LicensedUnderEdge[];

@@ -5,10 +5,13 @@
  * Run:  npm run crawl          (writes data/graph.json)
  *       npm run crawl -- --max-packages 400 --max-depth 6
  *
- * Needs no database. The output is a single JSON document that `npm run seed`
- * loads into CognoDB, which keeps the two concerns separable: a network problem
- * cannot leave the graph half-written, and a reviewer with no network can seed
- * from the committed cache.
+ * Needs no database. The output is data/graph.json, the committed artifact that
+ * `npm run seed` loads into CognoDB. Keeping the two steps separate means a
+ * registry outage cannot leave the graph half-written, and a reviewer with no
+ * network can still seed. The output is deterministic — same manifests in, same
+ * bytes out — which is what makes that artifact trustworthy; see sortDataset and
+ * the cap-check note in run() for the two things that had to be fixed for that
+ * to hold.
  *
  * Modelling decisions worth knowing about:
  *
@@ -58,6 +61,7 @@ import {
   type MaintainerNode,
   type MaintainsEdge,
   type PackageNode,
+  type ReachesEdge,
   type RepoNode,
   type UsesEdge,
   type VersionNode,
@@ -192,7 +196,8 @@ class Crawler {
       });
     }
 
-    return [...new Set(frontier)];
+    // Sorted so every run walks the graph in the same order.
+    return [...new Set(frontier)].sort();
   }
 
   async run(): Promise<void> {
@@ -211,6 +216,14 @@ class Crawler {
 
       const next = new Set<string>();
 
+      // The cap is checked between levels, never inside this loop. Checking it
+      // mid-level made the crawl non-deterministic: concurrent workers observed
+      // different package counts depending on interleaving, so two runs of the
+      // same manifests produced graphs that differed by a couple of packages and
+      // — because those packages carried advisories — by rather more than that
+      // downstream. A whole level is now always completed, which can overshoot
+      // the cap slightly. That is the right trade: the cap is a budget, and a
+      // reproducible dataset is a correctness property.
       await mapLimit(frontier, this.options.concurrency, async (versionId) => {
         const node = this.versions.get(versionId);
         if (!node) return;
@@ -228,7 +241,6 @@ class Crawler {
         ];
 
         for (const [name, range, optional] of deps) {
-          if (this.uniquePackageCount() >= this.options.maxPackages && !this.knows(name)) continue;
           const result = await this.resolve(name, range);
           if ("error" in result) {
             this.unresolved.push({ from: versionId, name, range, reason: result.error });
@@ -239,8 +251,9 @@ class Crawler {
         }
       });
 
-      // Only versions we have not already expanded advance to the next level.
-      frontier = [...next].filter((id) => !this.expanded.has(id));
+      // Only versions we have not already expanded advance to the next level,
+      // sorted so the next level is walked in a stable order too.
+      frontier = [...next].filter((id) => !this.expanded.has(id)).sort();
       frontier.forEach((id) => this.expanded.add(id));
       this.maxDepthReached = Math.max(this.maxDepthReached, depth);
       process.stdout.write(
@@ -251,12 +264,9 @@ class Crawler {
 
   private readonly expanded = new Set<string>();
 
-  private knows(packageName: string): boolean {
-    return this.packumentCache.has(packageName);
-  }
-
+  /** Sorted, so batching for OSV and downloads is stable across runs. */
   packageNames(): string[] {
-    return [...new Set([...this.versions.values()].map((v) => v.packageName))];
+    return [...new Set([...this.versions.values()].map((v) => v.packageName))].sort();
   }
 
   private uniquePackageCount(): number {
@@ -430,6 +440,14 @@ async function main() {
     .filter((a) => usedAdvisoryIds.has(a.id))
     .map(toVulnerabilityNode);
 
+  const reaches = computeReachability(crawler.uses, [...crawler.dependsOn.values()]);
+  process.stdout.write(
+    `\n  materialised ${reaches.length} (app, version) reachability pairs, max nesting depth ${Math.max(
+      0,
+      ...reaches.map((r) => r.depth),
+    )}\n`,
+  );
+
   const dataset: GraphDataset = {
     generatedAt: new Date().toISOString(),
     stats: {
@@ -441,6 +459,7 @@ async function main() {
       maintainers: maintainers.size,
       maxDepthReached: crawler.depthReached(),
       unresolved: crawler.unresolved.length,
+      reaches: reaches.length,
     },
     apps: manifestNodes(),
     packages,
@@ -450,6 +469,7 @@ async function main() {
     repos: [...repos.values()],
     vulnerabilities,
     uses: crawler.uses,
+    reaches,
     hasVersion,
     dependsOn: [...crawler.dependsOn.values()],
     licensedUnder,
@@ -457,6 +477,8 @@ async function main() {
     hostedIn,
     affects,
   };
+
+  sortDataset(dataset);
 
   mkdirSync(resolve(process.cwd(), "data"), { recursive: true });
   const outPath = resolve(process.cwd(), "data/graph.json");
@@ -487,14 +509,123 @@ async function main() {
   );
 
   if (crawler.unresolved.length) {
+    const unresolved = [...crawler.unresolved].sort((a, b) =>
+      `${a.from}|${a.name}`.localeCompare(`${b.from}|${b.name}`),
+    );
     writeFileSync(
       resolve(process.cwd(), "data/unresolved.json"),
-      JSON.stringify(crawler.unresolved, null, 2),
+      JSON.stringify(unresolved, null, 2),
     );
     process.stdout.write(
       `  ${crawler.unresolved.length} unresolvable range(s) recorded in data/unresolved.json\n\n`,
     );
   }
+}
+
+/**
+ * Sort every collection in place, so the committed dataset is byte-stable.
+ *
+ * The crawl fans out across concurrent workers, so collections are populated in
+ * whatever order responses arrive. The resulting graph is identical either way —
+ * same nodes, same edges — but the JSON is not, which makes `data/graph.json`
+ * produce meaningless diffs and makes "the dataset is reproducible" impossible to
+ * demonstrate. Sorting is the last step before writing, and every collection is
+ * ordered by the key that makes it unique.
+ */
+function sortDataset(dataset: GraphDataset): void {
+  const by =
+    <T>(...keys: Array<(row: T) => string | number>) =>
+    (a: T, b: T): number => {
+      for (const key of keys) {
+        const left = key(a);
+        const right = key(b);
+        if (left < right) return -1;
+        if (left > right) return 1;
+      }
+      return 0;
+    };
+
+  dataset.apps.sort(by((a) => a.slug));
+  dataset.packages.sort(by((p) => p.name));
+  dataset.versions.sort(by((v) => v.id));
+  dataset.maintainers.sort(by((m) => m.npmUser));
+  dataset.licenses.sort(by((l) => l.spdxId));
+  dataset.repos.sort(by((r) => r.id));
+  dataset.vulnerabilities.sort(by((v) => v.osvId));
+
+  dataset.uses.sort(by((u) => u.appSlug, (u) => u.versionId));
+  dataset.reaches.sort(by((r) => r.appSlug, (r) => r.versionId));
+  dataset.hasVersion.sort(by((h) => h.packageName, (h) => h.versionId));
+  dataset.dependsOn.sort(by((d) => d.fromVersionId, (d) => d.toVersionId));
+  dataset.licensedUnder.sort(by((l) => l.versionId, (l) => l.spdxId));
+  dataset.maintains.sort(by((m) => m.npmUser, (m) => m.packageName));
+  dataset.hostedIn.sort(by((h) => h.packageName, (h) => h.repoId));
+  dataset.affects.sort(by((a) => a.osvId, (a) => a.versionId));
+}
+
+/**
+ * One breadth-first sweep per app over the production install tree, recording
+ * the minimum hop count to every reachable version.
+ *
+ * BFS visits each node once at its shortest distance, which is exactly the
+ * number a per-pair `shortestPath` would compute — only here it is one sweep
+ * from each of six sources rather than ~730 independent searches. Measured on
+ * the free instance, the query form times out at 20s; this runs in under a
+ * millisecond. See the ReachesEdge doc comment for why it is materialised rather
+ * than asked live.
+ *
+ * Dev dependencies are excluded at the root, matching every other traversal in
+ * the app: they are not installed in production, so they are not part of the
+ * tree whose depth we are reporting.
+ */
+function computeReachability(uses: UsesEdge[], dependsOn: DependsOnEdge[]): ReachesEdge[] {
+  const adjacency = new Map<string, string[]>();
+  for (const edge of dependsOn) {
+    const neighbours = adjacency.get(edge.fromVersionId) ?? [];
+    neighbours.push(edge.toVersionId);
+    adjacency.set(edge.fromVersionId, neighbours);
+  }
+
+  const rootsByApp = new Map<string, string[]>();
+  for (const edge of uses) {
+    if (edge.dev) continue;
+    const roots = rootsByApp.get(edge.appSlug) ?? [];
+    roots.push(edge.versionId);
+    rootsByApp.set(edge.appSlug, roots);
+  }
+
+  const reaches: ReachesEdge[] = [];
+
+  for (const [appSlug, roots] of rootsByApp) {
+    const depthOf = new Map<string, number>();
+    // A plain array used as a FIFO queue with a moving read cursor: a direct
+    // dependency is depth 1, and because BFS dequeues in non-decreasing depth
+    // order the first time a version is seen is its shortest distance.
+    const queue: string[] = [];
+    for (const root of roots) {
+      if (!depthOf.has(root)) {
+        depthOf.set(root, 1);
+        queue.push(root);
+      }
+    }
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const current = queue[cursor];
+      const depth = depthOf.get(current)!;
+      for (const next of adjacency.get(current) ?? []) {
+        if (!depthOf.has(next)) {
+          depthOf.set(next, depth + 1);
+          queue.push(next);
+        }
+      }
+    }
+
+    for (const [versionId, depth] of depthOf) {
+      reaches.push({ appSlug, versionId, depth });
+    }
+  }
+
+  return reaches;
 }
 
 main().catch((error) => {

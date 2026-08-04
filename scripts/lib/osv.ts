@@ -13,6 +13,7 @@
  * wrong in the permissive direction would make the whole app cry wolf.
  */
 
+import { createHash } from "node:crypto";
 import semver from "semver";
 import { fetchJson, mapLimit } from "./http";
 import type { Severity, VulnerabilityNode } from "../../src/lib/model";
@@ -49,11 +50,15 @@ export async function queryAdvisoryIds(names: string[]): Promise<Map<string, str
   const batches: string[][] = [];
   for (let i = 0; i < names.length; i += 200) batches.push(names.slice(i, i + 200));
 
-  await mapLimit(batches, 3, async (batch, batchIndex) => {
+  await mapLimit(batches, 3, async (batch) => {
     const response = await fetchJson<{ results?: Array<{ vulns?: Array<{ id: string }> }> }>({
       url: `${OSV}/querybatch`,
       namespace: "osv-batch",
-      key: `batch-${batchIndex}-${batch.length}-${batch[0]}`,
+      // Keyed by batch *contents*, not position. A positional key silently
+      // mismatches whenever the package list shifts by even one entry, so a
+      // re-crawl re-queries OSV and can pick up a different advisory set —
+      // which is exactly how a "cached" run stopped being reproducible.
+      key: createHash("sha1").update(batch.join(",")).digest("hex"),
       method: "POST",
       body: {
         queries: batch.map((name) => ({ package: { name, ecosystem: "npm" } })),
