@@ -6,9 +6,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 3100",
     "build": "next build",
-    "start": "next start",
+    "start": "next start --port 3100",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "probe": "tsx --env-file-if-exists=.env.local scripts/probe.ts",

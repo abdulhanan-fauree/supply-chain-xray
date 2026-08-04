@@ -1,26 +1,135 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * Design tokens.
+ *
+ * One neutral ramp plus a severity scale, because the whole interface exists to
+ * rank risk and a second decorative hue would compete with that. Severity
+ * colours are the only saturated things on the page, which is what makes a
+ * CRITICAL badge read instantly instead of being one colour among many.
+ *
+ * Both themes are defined; the app follows the viewer's system preference.
+ */
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+:root {
+  --bg: oklch(99% 0.002 265);
+  --bg-subtle: oklch(97% 0.003 265);
+  --panel: oklch(100% 0 0);
+  --border: oklch(91% 0.004 265);
+  --border-strong: oklch(84% 0.006 265);
+  --text: oklch(23% 0.012 265);
+  --text-muted: oklch(52% 0.01 265);
+  --text-faint: oklch(65% 0.008 265);
+  --accent: oklch(52% 0.16 258);
+  --accent-soft: oklch(96% 0.02 258);
+
+  --critical: oklch(50% 0.2 18);
+  --critical-soft: oklch(96% 0.03 18);
+  --high: oklch(58% 0.17 40);
+  --high-soft: oklch(96% 0.04 55);
+  --moderate: oklch(64% 0.13 78);
+  --moderate-soft: oklch(96% 0.05 90);
+  --low: oklch(58% 0.08 240);
+  --low-soft: oklch(96% 0.02 240);
+  --clean: oklch(56% 0.12 155);
+  --clean-soft: oklch(96% 0.03 155);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --bg: oklch(17% 0.008 265);
+    --bg-subtle: oklch(20% 0.009 265);
+    --panel: oklch(22% 0.01 265);
+    --border: oklch(29% 0.011 265);
+    --border-strong: oklch(38% 0.013 265);
+    --text: oklch(95% 0.004 265);
+    --text-muted: oklch(72% 0.01 265);
+    --text-faint: oklch(58% 0.01 265);
+    --accent: oklch(72% 0.14 258);
+    --accent-soft: oklch(28% 0.05 258);
+
+    --critical: oklch(70% 0.19 18);
+    --critical-soft: oklch(27% 0.07 18);
+    --high: oklch(75% 0.15 50);
+    --high-soft: oklch(27% 0.06 50);
+    --moderate: oklch(80% 0.12 85);
+    --moderate-soft: oklch(27% 0.05 85);
+    --low: oklch(74% 0.1 240);
+    --low-soft: oklch(26% 0.04 240);
+    --clean: oklch(75% 0.13 155);
+    --clean-soft: oklch(25% 0.05 155);
   }
 }
 
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-panel: var(--panel);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text);
+  --color-ink-muted: var(--text-muted);
+  --color-ink-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-critical: var(--critical);
+  --color-critical-soft: var(--critical-soft);
+  --color-high: var(--high);
+  --color-high-soft: var(--high-soft);
+  --color-moderate: var(--moderate);
+  --color-moderate-soft: var(--moderate-soft);
+  --color-low: var(--low);
+  --color-low-soft: var(--low-soft);
+  --color-clean: var(--clean);
+  --color-clean-soft: var(--clean-soft);
+}
+
+html {
+  color-scheme: light dark;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Tabular figures wherever numbers are compared down a column. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
 }

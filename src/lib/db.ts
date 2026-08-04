@@ -94,9 +94,15 @@ function createDriver(env: Env): Driver {
       // The free c0 instance allows 200 connections; a web app needs very few,
       // and keeping the pool small avoids starving the seed script.
       maxConnectionPoolSize: 12,
-      connectionAcquisitionTimeout: 15_000,
-      connectionTimeout: 10_000,
-      maxTransactionRetryTime: 8_000,
+      // Tuned for how long a person will stare at a loading skeleton before
+      // concluding the page is broken. Measured against an unreachable host:
+      // the defaults took ~10s to surface the error card, these bring it to
+      // ~4.8s. Still generous next to the ~250ms a healthy query needs, but
+      // two connection attempts have to fail before we can honestly say the
+      // instance is unreachable rather than briefly slow.
+      connectionAcquisitionTimeout: 6_000,
+      connectionTimeout: 4_000,
+      maxTransactionRetryTime: 4_000,
     },
   );
 }
