@@ -23,10 +23,42 @@ type Check = {
   name: string;
   /** Why the application cares. Appears in the report. */
   why: string;
+  /**
+   * Set when the *expected* outcome is a failure — a documented divergence or a
+   * feature we want to prove is absent. These do not count against the run, but
+   * if one starts passing that is news worth seeing.
+   */
+  expectFailure?: boolean;
   run: (session: Session) => Promise<string>;
 };
 
 const PROBE_LABEL = "__Probe";
+
+/**
+ * PASS/FAIL mean what you expect. AS-EXPECTED is a check that was *supposed* to
+ * fail — a documented divergence or an absent feature we rely on being absent.
+ * SURPRISE is one of those starting to pass, which is worth reading about.
+ */
+type Status = "PASS" | "FAIL" | "AS-EXPECTED" | "SURPRISE";
+
+type Result = {
+  name: string;
+  why: string;
+  status: Status;
+  note: string;
+  ms: number;
+};
+
+function toResult(check: Check, ok: boolean, note: string, ms: number): Result {
+  const status: Status = check.expectFailure
+    ? ok
+      ? "SURPRISE"
+      : "AS-EXPECTED"
+    : ok
+      ? "PASS"
+      : "FAIL";
+  return { name: check.name, why: check.why, status, note, ms };
+}
 
 const checks: Check[] = [
   {
@@ -107,7 +139,7 @@ const checks: Check[] = [
          MATCH (a:${PROBE_LABEL} {key: 'probe-' + toString(i)})
          MATCH (b:${PROBE_LABEL} {key: 'probe-' + toString(i + 1)})
          MERGE (a)-[r:PROBE_DEPENDS_ON]->(b)
-         SET r.range = '^1.0.0', r.dev = (i % 5 = 0)
+         SET r.range = '^1.0.0', r.dev = (i = 3)
          RETURN count(r) AS created`,
         {},
       );
@@ -129,16 +161,47 @@ const checks: Check[] = [
   },
   {
     name: "Edge-property filter inside a traversal",
-    why: "Dev-only dependencies must be excluded partway through a walk, not after it.",
+    why: "Optional dependencies must be excluded partway through a walk, not after it, so 'what if optional deps are not installed' is answerable.",
     run: async (session) => {
+      // Note the named path and relationships(p). See the next check for why
+      // the more familiar Neo4j spelling is not used anywhere in this codebase.
+      //
+      // The probe chain flags exactly one edge, probe-3 -> probe-4, so a working
+      // filter reaches probe-1..probe-3 and stops: 3 nodes, against 8 unfiltered.
+      // Asserting the number matters — a filter that silently matched nothing
+      // would also "succeed" if we only checked that the query ran.
+      const expected = 3;
       const result = await session.run(
-        `MATCH (start:${PROBE_LABEL} {key: $startKey})
-         MATCH (start)-[rels:PROBE_DEPENDS_ON*1..8]->(reached)
+        `MATCH p = (start:${PROBE_LABEL} {key: $startKey})-[:PROBE_DEPENDS_ON*1..8]->(reached)
+         WHERE none(r IN relationships(p) WHERE r.dev)
+         RETURN count(DISTINCT reached) AS reached`,
+        { startKey: "probe-0" },
+      );
+      const reached = result.records[0].get("reached") as number;
+      if (reached !== expected) {
+        throw new Error(`filter reached ${reached} nodes, expected exactly ${expected}`);
+      }
+      return `reached exactly ${reached} of 8 nodes, stopping at the flagged edge`;
+    },
+  },
+  {
+    name: "Bare list variable on a variable-length pattern",
+    why: "Expected to FAIL. This is a real divergence from Neo4j and the reason every traversal in this codebase names its path.",
+    expectFailure: true,
+    run: async (session) => {
+      // In Neo4j, `-[rels:TYPE*1..8]->` binds rels to a list of relationships.
+      // CognoDB binds it to a Path, so none()/size()/any() over it error with
+      // "requires list, got *types.Path". The fix is to name the path and call
+      // relationships(p) — verified working in the check above. This check is
+      // kept deliberately failing so the divergence stays documented and a
+      // future CognoDB release that fixes it shows up as a passing row.
+      await session.run(
+        `MATCH (start:${PROBE_LABEL} {key: $startKey})-[rels:PROBE_DEPENDS_ON*1..8]->(reached)
          WHERE none(r IN rels WHERE r.dev)
          RETURN count(DISTINCT reached) AS reached`,
         { startKey: "probe-0" },
       );
-      return `reached ${result.records[0].get("reached")} nodes excluding dev edges`;
+      return "bare list variable IS supported (Neo4j-compatible)";
     },
   },
   {
@@ -218,6 +281,7 @@ const checks: Check[] = [
   {
     name: "APOC availability",
     why: "Expected to be absent. Confirming it lets us guarantee the app is pure openCypher.",
+    expectFailure: true,
     run: async (session) => {
       await session.run("RETURN apoc.version() AS version");
       return "APOC IS available (the app still avoids it)";
@@ -230,7 +294,7 @@ async function main() {
   console.log(`\nProbing ${describeConnection(env)}\n`);
 
   const driver = createStandaloneDriver();
-  const results: { name: string; why: string; ok: boolean; note: string; ms: number }[] = [];
+  const results: Result[] = [];
 
   try {
     for (const check of checks) {
@@ -239,16 +303,16 @@ async function main() {
       try {
         const note = await check.run(session);
         const ms = Date.now() - started;
-        results.push({ name: check.name, why: check.why, ok: true, note, ms });
-        console.log(`  PASS  ${check.name} — ${note} (${ms}ms)`);
+        results.push({ ...toResult(check, true, note, ms) });
       } catch (error) {
         const ms = Date.now() - started;
         const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
-        results.push({ name: check.name, why: check.why, ok: false, note: message, ms });
-        console.log(`  FAIL  ${check.name} — ${message}`);
+        results.push({ ...toResult(check, false, message, ms) });
       } finally {
         await session.close();
       }
+      const last = results[results.length - 1];
+      console.log(`  ${last.status.padEnd(11)} ${last.name} — ${last.note}`);
     }
   } finally {
     await cleanup(driver, env.COGNODB_DATABASE);
@@ -259,9 +323,24 @@ async function main() {
   writeFileSync(reportPath, renderReport(results));
   console.log(`\nReport written to ${reportPath}\n`);
 
-  const failed = results.filter((r) => !r.ok && r.name !== "APOC availability");
+  const failed = results.filter((r) => r.status === "FAIL");
+  const surprises = results.filter((r) => r.status === "SURPRISE");
   if (failed.length) {
-    console.log(`${failed.length} capability check(s) failed — see report before building on them.\n`);
+    console.log(
+      `${failed.length} capability check(s) failed — do not build on them:\n` +
+        failed.map((r) => `  - ${r.name}: ${r.note}`).join("\n") +
+        "\n",
+    );
+  }
+  if (surprises.length) {
+    console.log(
+      `${surprises.length} check(s) expected to fail now pass — the workaround they justify may no longer be needed:\n` +
+        surprises.map((r) => `  - ${r.name}`).join("\n") +
+        "\n",
+    );
+  }
+  if (!failed.length && !surprises.length) {
+    console.log("Every capability this application relies on is present.\n");
   }
 }
 
@@ -296,28 +375,55 @@ async function cleanup(driver: ReturnType<typeof createStandaloneDriver>, databa
   }
 }
 
-function renderReport(
-  results: { name: string; why: string; ok: boolean; note: string; ms: number }[],
-): string {
-  const lines = [
+const STATUS_LABEL: Record<Status, string> = {
+  PASS: "supported",
+  FAIL: "**NOT supported**",
+  "AS-EXPECTED": "absent, as expected",
+  SURPRISE: "**now supported** (was not)",
+};
+
+function renderReport(results: Result[]): string {
+  const escape = (text: string) => text.replace(/\|/g, "\\|");
+  return [
     "# CognoDB capability report",
     "",
-    "Generated by `npm run probe`. CognoDB is openCypher-over-Bolt but is not Neo4j,",
-    "so every feature this application depends on is verified against a live instance",
+    "Generated by `npm run probe`. CognoDB speaks openCypher over Bolt and works",
+    "with the official Neo4j driver, but it is a reimplementation rather than Neo4j —",
+    "it reports itself as `Neo4j/5.26.0` while surfacing Go type names in errors. Every",
+    "feature this application depends on is therefore verified against a live instance",
     "before the data model or query layer relies on it.",
     "",
     "| Capability | Result | Detail | Why it matters |",
     "| --- | --- | --- | --- |",
     ...results.map(
-      (r) =>
-        `| ${r.name} | ${r.ok ? "supported" : "**not supported**"} | ${r.note.replace(
-          /\|/g,
-          "\\|",
-        )} | ${r.why} |`,
+      (r) => `| ${escape(r.name)} | ${STATUS_LABEL[r.status]} | ${escape(r.note)} | ${escape(r.why)} |`,
     ),
     "",
-  ];
-  return lines.join("\n");
+    "## The one divergence that shaped the code",
+    "",
+    "In Neo4j, `MATCH (a)-[rels:TYPE*1..8]->(b)` binds `rels` to a **list of",
+    "relationships**, so `none(r IN rels WHERE r.optional)` is the natural way to filter",
+    "an edge property partway through a traversal. CognoDB binds that variable to a",
+    "**Path**, and list functions reject it:",
+    "",
+    "```",
+    "none() requires list, got *types.Path",
+    "size() requires string or list, got *types.Path",
+    "```",
+    "",
+    "The fix is to name the path and go through `relationships()`, which is verified",
+    "working above:",
+    "",
+    "```cypher",
+    "MATCH p = (a)-[:DEPENDS_ON*1..8]->(b)",
+    "WHERE none(r IN relationships(p) WHERE r.optional)",
+    "```",
+    "",
+    "Every traversal in this codebase names its path for that reason. `nodes(p)`,",
+    "`relationships(p)`, `length(p)`, `size()`, `all()`, `any()`, `none()` and `reduce()`",
+    "all behave normally once the path is named.",
+    "",
+  ].join("\n");
 }
 
 main().catch((error) => {
