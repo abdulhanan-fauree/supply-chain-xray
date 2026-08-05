@@ -4,7 +4,7 @@
 
 A graph database application built on [CognoDB](https://console.cognodb.com), backed by real data from the npm registry and [OSV.dev](https://osv.dev). Six applications, 1,019 packages, 1,234 installed versions, 2,057 dependency edges, 126 advisories.
 
-- **Live demo:** _(deploying — link to follow)_
+- **Live demo:** **https://supply-chain-xray.vercel.app**
 - **Screen recording:** _(to follow)_
 
 ---
@@ -453,7 +453,11 @@ No advisory in this dataset spans more than one application. The vulnerable vers
 npm run build && npm run start
 ```
 
-Deployed on Vercel's free tier with the same three environment variables. All six application pages prerender at build time via `generateStaticParams`; if the database is unreachable during a build, it returns `[]` and pages render on demand rather than failing the deploy.
+Live at **https://supply-chain-xray.vercel.app**, on Vercel's free tier, reading from the same CognoDB instance.
+
+The four `COGNODB_*` variables are set as encrypted production environment variables. All six application pages prerender at build time via `generateStaticParams`; if the database is unreachable during a build it returns `[]` and pages render on demand instead, so a transient database problem cannot fail a deploy.
+
+Note that Vercel protects deployment-specific URLs (`…-pqbnonjsi-….vercel.app`) behind Vercel Authentication by default — those return a 302. The public entry point is the production alias above.
 
 ---
 
