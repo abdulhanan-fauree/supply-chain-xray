@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+
+import { Nav } from "@/components/nav";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -7,14 +9,6 @@ export const metadata: Metadata = {
   description:
     "Trace which of your applications a published vulnerability actually reaches, through what chain of transitive dependencies, and which single direct dependency cuts it off.",
 };
-
-const NAV = [
-  { href: "/", label: "Overview" },
-  { href: "/vulnerabilities", label: "Vulnerabilities" },
-  { href: "/packages", label: "Packages" },
-  { href: "/maintainers", label: "Trust" },
-  { href: "/queries", label: "Queries" },
-];
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
@@ -31,17 +25,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               </span>
               Supply Chain X-Ray
             </Link>
-            <nav className="flex items-center gap-1 text-sm">
-              {NAV.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className="rounded-md px-2.5 py-1.5 text-ink-muted transition-colors hover:bg-bg-subtle hover:text-ink"
-                >
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
+            <Nav />
           </div>
         </header>
 

@@ -9,12 +9,14 @@ import {
   getBlastRadius,
   getDepthHistogram,
   getLicenseObligations,
+  getTreeMap,
   groupByAffectedVersion,
   type AffectedVersionGroup,
   type FixPoint,
 } from "@/lib/queries/app-detail";
 import { loadOrNotFound, withDbFallback } from "@/components/db-error";
 import { ChainLegend, DependencyChain } from "@/components/dependency-chain";
+import { TreeMap } from "@/components/tree-map";
 import {
   CleanBadge,
   CleanState,
@@ -95,6 +97,10 @@ export default async function AppDetailPage({ params }: PageProps<"/apps/[slug]"
           hint="share declared directly"
         />
       </div>
+
+      <Suspense fallback={<PanelSkeleton title="The install tree" rows={7} />}>
+        <TreePanel slug={slug} />
+      </Suspense>
 
       <Suspense fallback={<FindingsSkeleton />}>
         <Findings slug={slug} appName={header.name} />
@@ -238,7 +244,7 @@ function AffectedVersionRow({
 
         <div className="shrink-0 text-right text-xs">
           <div className="text-ink-muted">
-            {group.depth === 1 ? "you declared this" : `${group.depth} hops down`}
+            {group.depth === 1 ? "declared directly" : `${group.depth} hops down`}
           </div>
           <div className="mt-0.5 font-mono text-ink-faint">
             {group.clearedBy ? `cleared by ${group.clearedBy}` : "no fix published"}
@@ -276,6 +282,26 @@ function AffectedVersionRow({
         </ul>
       </details>
     </li>
+  );
+}
+
+async function TreePanel({ slug }: { slug: string }) {
+  return withDbFallback(
+    "install tree",
+    () => getTreeMap(slug),
+    (nodes) =>
+      nodes.length === 0 ? (
+        <Panel title="The install tree">
+          <EmptyState title="No dependencies recorded" />
+        </Panel>
+      ) : (
+        <Panel
+          title="The install tree"
+          description="One cell per installed version, grouped by how far it sits from the application. Coloured cells carry advisories."
+        >
+          <TreeMap nodes={nodes} />
+        </Panel>
+      ),
   );
 }
 

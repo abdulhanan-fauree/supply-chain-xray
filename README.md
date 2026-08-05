@@ -131,30 +131,35 @@ Every application, its full install tree, and every advisory that reaches it.
 
 ![Overview](docs/screenshots/01-overview.png)
 
+### The install tree at a glance
+One cell per installed version, grouped by depth, coloured only when something is wrong. Scale is literal — 207 cells look like 207 things where "207" reads as an abstraction — and the clustering is the finding: **all 16 direct dependencies are at risk, 11 more at level 2, 2 at level 3, then clean.** A count alone cannot show that.
+
+![Install tree](docs/screenshots/02-install-tree.png)
+
 ### Blast radius — the chain is the product
-`storefront-web` → `next@15.5.22` → `postcss@8.4.31`. One direct dependency carries all five findings. Below it, the license panel traces LGPL binaries four hops down.
+`storefront-web` → `next@15.5.22` → `postcss@8.4.31`. One declared dependency carries all five findings. Below it, the licence panel traces LGPL binaries four hops down.
 
-![Blast radius](docs/screenshots/02-blast-radius-chain.png)
-
-### Fix points
-16 direct dependencies carry all 105 findings, and the three biggest account for 62 of them. Triage rather than a wall of CVEs.
-
-![Fix points](docs/screenshots/03-app-fix-points.png)
+![Blast radius](docs/screenshots/03-blast-radius-chain.png)
 
 ### A clean application
-Four of the six applications have no advisories at all, so the clean state is designed rather than incidental.
+Four of the six applications have no advisories at all, so the all-clear state is designed rather than incidental.
 
 ![Clean app](docs/screenshots/04-app-clean.png)
 
-### Advisories, and who is exposed
+### Advisories, filtered by severity
+Filters are links, so a filtered view is a shareable URL and works with no JavaScript.
+
 ![Advisories](docs/screenshots/05-advisories.png)
 
+### Who is exposed — the graph in reverse
 ![Advisory detail](docs/screenshots/06-advisory-detail.png)
 
 ### Shared choke points
+Filtered to the 148 packages no application declared.
+
 ![Choke points](docs/screenshots/07-choke-points.png)
 
-### One package: versions, publish rights, and what pulls it in
+### One package: versions, publish rights, dependents
 ![Package detail](docs/screenshots/08-package-detail.png)
 
 ### Trust concentration
@@ -162,8 +167,13 @@ The top 5 npm accounts can publish to **40%** of the installed packages — 403 
 
 ![Trust](docs/screenshots/09-trust.png)
 
+### Six degrees of separation
+Shortest path between any two packages, with server-rendered autocomplete over all installed names.
+
+![Explore](docs/screenshots/10-explore.png)
+
 ### Every query, documented in the app
-![Queries](docs/screenshots/10-queries.png)
+![Queries](docs/screenshots/11-queries.png)
 
 Regenerate with `./scripts/screenshots.sh` after a UI change, so they cannot go stale.
 
@@ -307,13 +317,18 @@ Real finding: `storefront-web` carries 14 weak-copyleft dependencies, all of sha
 src/
   app/                     Next.js 16 App Router — server components only
     page.tsx               Portfolio dashboard
-    apps/[slug]/           Blast radius, fix points, depth, licenses
+    apps/[slug]/           Install tree, blast radius, fix points, licences
+    explore/               Shortest path between two packages
     vulnerabilities/       Advisory list + reverse blast radius
     packages/              Choke points + package detail
     maintainers/           Trust concentration
     queries/               Self-documenting query catalogue (static)
   components/
     dependency-chain.tsx   The path ribbon — the core visual
+    tree-map.tsx           The whole install tree as a depth-banded grid
+    nav.tsx                Active-section nav (the only client component)
+    filter-chips.tsx       URL-state filters and search
+    pagination.tsx         URL-state pagination
     db-error.tsx           Failure-mode UI + withDbFallback
     primitives.tsx         Severity badges, stat tiles, skeletons
   lib/
@@ -363,6 +378,19 @@ The pieces several layers agree on are factored out rather than reimplemented pe
 `records.ts` earns its place: mapping an untyped Bolt record otherwise means a cast per field, and a cast silences the compiler without checking anything — rename a column and `record.slug as string` yields `undefined` typed as `string`, failing somewhere unrelated. The readers check and throw naming the column, which turns a schema mismatch into an immediate, locatable error.
 
 `fragments.ts` holds the "shortest chain from a declared dependency" subquery that three queries need. Duplicated, a change to the dev-dependency filter or the depth bound had to be applied in three places and would diverge in whichever was missed.
+
+### Interaction model
+
+The application is server-rendered throughout; there is exactly one client
+component, and it exists only because knowing the active nav section requires the
+current pathname.
+
+Everything interactive therefore lives in the URL — pagination, severity filters,
+the package search, and the path explorer's two inputs are all `GET` state. That
+buys three things worth more than client interactivity: any view is a shareable
+link, the back button behaves, and the whole application is usable with
+JavaScript disabled. The explorer's autocomplete covers every installed package
+via a server-rendered `<datalist>`, so it ships no search index and no bundle.
 
 ### Pagination
 

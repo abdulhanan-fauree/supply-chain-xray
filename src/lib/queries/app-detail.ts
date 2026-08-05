@@ -1,5 +1,10 @@
 import { read, readOne } from "../db";
-import { compareSeverity, emptySeverityCounts, type SeverityCounts } from "../severity";
+import {
+  compareSeverity,
+  emptySeverityCounts,
+  worstSeverity,
+  type SeverityCounts,
+} from "../severity";
 import { highestVersion, packageNameOf } from "../version-id";
 import type { LicenseCategory, Severity } from "../model";
 import { SHORTEST_CHAIN_FROM_DECLARED, VULNERABILITY_FIELDS } from "./fragments";
@@ -298,6 +303,43 @@ export function fixPointConcentration(
   };
 }
 
+/**
+ * Every installed version in one tree, with its depth and worst severity.
+ *
+ * Backs the tree map: a few hundred rows, one per installed version, which is
+ * small enough to render as a grid and large enough to make the shape of a
+ * dependency tree legible at a glance. Counts alone cannot show that the
+ * vulnerable packages cluster at a particular depth.
+ */
+export type TreeNode = {
+  versionId: string;
+  packageName: string;
+  version: string;
+  depth: number;
+  severity: Severity | null;
+};
+
+const TREE_MAP = `
+MATCH (app:App {slug: $slug})-[reach:REACHES]->(dep:Version)
+OPTIONAL MATCH (vuln:Vulnerability)-[:AFFECTS]->(dep)
+RETURN dep.id          AS versionId,
+       dep.packageName AS packageName,
+       dep.version     AS version,
+       reach.depth     AS depth,
+       collect(vuln.severity) AS severities
+ORDER BY reach.depth, dep.packageName
+`;
+
+export async function getTreeMap(slug: string): Promise<TreeNode[]> {
+  return read(TREE_MAP, { slug }, (row) => ({
+    versionId: row.string("versionId"),
+    packageName: row.string("packageName"),
+    version: row.string("version"),
+    depth: row.count("depth"),
+    severity: worstSeverity(row.list("severities")),
+  }));
+}
+
 export type DepthBucket = { depth: number; count: number };
 
 const DEPTH_HISTOGRAM = `
@@ -379,5 +421,6 @@ export const APP_DETAIL_CYPHER = {
   VULNERABLE_PATHS,
   VULNERABLE_VERSIONS,
   DEPTH_HISTOGRAM,
+  TREE_MAP,
   LICENSE_OBLIGATIONS,
 };

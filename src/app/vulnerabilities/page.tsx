@@ -6,6 +6,8 @@ import { withDbFallback } from "@/components/db-error";
 import { PAGE_SIZE } from "@/lib/config";
 import { EmptyState, Panel, SeverityBadge, Skeleton } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
+import { FilterChips } from "@/components/filter-chips";
+import { SEVERITY_ORDER } from "@/lib/severity";
 
 // Next.js requires route segment config to be a statically analysable literal, so
 // this cannot be imported from lib/config. Keep the value in step with the note
@@ -64,15 +66,45 @@ async function List({ params }: { params: Record<string, string | string[] | und
         ? `${rows.length} reaching production trees. ${multiApp} touch more than one application; ${direct} sit in a dependency somebody declared directly.`
         : `${rows.length} reaching production trees, ${direct} of them in a dependency somebody declared directly. None spans two applications: the vulnerable versions here are pinned old releases specific to one app, while the packages several apps share are all current.`;
 
-    const page = paginate(rows, params.page as string | undefined, PAGE_SIZE.advisories);
+    const severity = typeof params.severity === "string" ? params.severity : undefined;
+    const filtered = severity ? rows.filter((row) => row.severity === severity) : rows;
+    const page = paginate(filtered, params.page as string | undefined, PAGE_SIZE.advisories);
+
+    const options = [
+      { label: "all", count: rows.length },
+      ...SEVERITY_ORDER.map((level) => ({
+        value: level,
+        label: level.toLowerCase(),
+        count: rows.filter((row) => row.severity === level).length,
+      })).filter((option) => option.count > 0),
+    ];
 
     return (
-      <Panel title="Advisories" description={description}>
-        <ul className="divide-y divide-line">
-          {page.items.map((row) => (
-            <Row key={row.osvId} row={row} />
-          ))}
-        </ul>
+      <Panel
+        title="Advisories"
+        description={description}
+        action={
+          <FilterChips
+            basePath="/vulnerabilities"
+            param="severity"
+            options={options}
+            current={severity}
+            searchParams={params}
+            label="severity"
+          />
+        }
+      >
+        {page.items.length === 0 ? (
+          <EmptyState title={`No ${severity?.toLowerCase()} advisories`}>
+            Nothing at this severity reaches a production tree. Clear the filter to see the rest.
+          </EmptyState>
+        ) : (
+          <ul className="divide-y divide-line">
+            {page.items.map((row) => (
+              <Row key={row.osvId} row={row} />
+            ))}
+          </ul>
+        )}
         <Pagination
           page={page}
           basePath="/vulnerabilities"

@@ -133,3 +133,55 @@ body {
     animation: none;
   }
 }
+
+/*
+ * Keyboard focus.
+ *
+ * Browsers ship a default focus ring; :focus-visible narrows it to keyboard
+ * navigation so it never appears on a mouse click. Defined once globally rather
+ * than per component, because a component that forgets it is an accessibility
+ * regression nobody notices until someone tries to tab through the page.
+ */
+:where(a, button, summary, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Selection picks up the accent rather than the browser default blue. */
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/*
+ * Text inputs. Styled here rather than per form: there are few of them and they
+ * should be indistinguishable from each other.
+ */
+.field {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  transition: border-color 120ms ease;
+}
+
+.field:hover {
+  border-color: var(--border-strong);
+}
+
+.field::placeholder {
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

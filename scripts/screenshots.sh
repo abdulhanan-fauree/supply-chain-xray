@@ -41,15 +41,16 @@ mkdir -p "$OUT_DIR"
 # point table and were cut off entirely at 1100px.
 PAGES=(
   "01-overview|/|1440,1100"
-  "02-blast-radius-chain|/apps/storefront-web|1440,1500"
-  "03-app-fix-points|/apps/legacy-admin|1440,2600"
-  "04-app-clean|/apps/mobile-companion|1440,1300"
-  "05-advisories|/vulnerabilities|1440,1200"
+  "02-install-tree|/apps/legacy-admin|1440,1250"
+  "03-blast-radius-chain|/apps/storefront-web|1440,1750"
+  "04-app-clean|/apps/mobile-companion|1440,1400"
+  "05-advisories|/vulnerabilities?severity=CRITICAL|1440,1250"
   "06-advisory-detail|/vulnerabilities/GHSA-vh95-rmgr-6w4m|1440,1300"
-  "07-choke-points|/packages|1440,1300"
+  "07-choke-points|/packages?show=undeclared|1440,1350"
   "08-package-detail|/packages/minimist|1440,1400"
   "09-trust|/maintainers|1440,1500"
-  "10-queries|/queries|1440,1600"
+  "10-explore|/explore?from=handlebars&to=minimist|1440,1150"
+  "11-queries|/queries|1440,1600"
 )
 
 for entry in "${PAGES[@]}"; do

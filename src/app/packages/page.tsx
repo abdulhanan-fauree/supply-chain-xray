@@ -13,6 +13,7 @@ import {
 } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
 import { CHOKE_POINT_MIN_APPS, PAGE_SIZE } from "@/lib/config";
+import { FilterChips, SearchBox } from "@/components/filter-chips";
 
 // Next.js requires route segment config to be a statically analysable literal, so
 // this cannot be imported from lib/config. Keep the value in step with the note
@@ -63,7 +64,15 @@ async function List({ params }: { params: Record<string, string | string[] | und
       const undeclared = rows.filter((row) => row.neverDeclared);
       const allSix = rows.filter((row) => row.appsReached >= 6);
       const vulnerable = rows.filter((row) => row.advisories > 0);
-      const page = paginate(rows, params.page as string | undefined, PAGE_SIZE.chokePoints);
+      const query = typeof params.q === "string" ? params.q.trim().toLowerCase() : "";
+      const show = typeof params.show === "string" ? params.show : undefined;
+
+      let visible = rows;
+      if (query) visible = visible.filter((row) => row.name.toLowerCase().includes(query));
+      if (show === "undeclared") visible = visible.filter((row) => row.neverDeclared);
+      if (show === "vulnerable") visible = visible.filter((row) => row.advisories > 0);
+
+      const page = paginate(visible, params.page as string | undefined, PAGE_SIZE.chokePoints);
 
       return (
         <div className="space-y-6">
@@ -85,12 +94,39 @@ async function List({ params }: { params: Record<string, string | string[] | und
           <Panel
             title="Choke points"
             description="Ranked by how many applications reach them. Depth is the shallowest hop count across those applications."
+            action={
+              <div className="flex flex-wrap items-center gap-3">
+                <FilterChips
+                  basePath="/packages"
+                  param="show"
+                  options={[
+                    { label: "all", count: rows.length },
+                    { value: "undeclared", label: "never declared", count: undeclared.length },
+                    { value: "vulnerable", label: "vulnerable", count: vulnerable.length },
+                  ]}
+                  current={show}
+                  searchParams={params}
+                  label="show"
+                />
+                <SearchBox
+                  basePath="/packages"
+                  value={query}
+                  placeholder="filter by name"
+                  searchParams={params}
+                />
+              </div>
+            }
           >
             <ul className="divide-y divide-line">
               {page.items.map((row) => (
                 <Row key={row.name} row={row} />
               ))}
             </ul>
+            {page.items.length === 0 && (
+              <EmptyState title="Nothing matches">
+                No shared package matches this filter. Try clearing the search or the category.
+              </EmptyState>
+            )}
             <Pagination
               page={page}
               basePath="/packages"
