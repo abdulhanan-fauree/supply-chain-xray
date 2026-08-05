@@ -1,17 +1,17 @@
 import Link from "next/link";
+
 import type { Severity } from "@/lib/model";
+import { parseVersionId } from "@/lib/version-id";
 
 /**
  * A dependency path, drawn as a readable chain.
  *
- * This is the component the whole application is built around. A force-directed
- * graph of 1,200 nodes looks impressive and answers nothing; the question people
- * actually have is "how did this get into my app", and the answer is a sequence
- * of four or five package names. So the sequence is what gets drawn, at a size
- * you can read, with the two ends labelled: the head is the dependency you
- * declared and can change, the tail is the version carrying the advisory.
- *
- * Everything in between is the part nobody chose.
+ * The central visual of the application. A force-directed graph of a thousand
+ * nodes is impressive and answers nothing; the question is "how did this get
+ * here", and the answer is a sequence of four or five package names. So the
+ * sequence is what gets drawn, at a legible size, with both ends labelled: the
+ * head is the declared dependency that can be changed, the tail is the version
+ * carrying the advisory. Everything between them was chosen by nobody.
  */
 
 const TAIL_TONE: Record<Severity, string> = {
@@ -21,13 +21,6 @@ const TAIL_TONE: Record<Severity, string> = {
   LOW: "border-low/40 bg-low-soft text-low",
   UNKNOWN: "border-line-strong bg-bg-subtle text-ink-muted",
 };
-
-function splitVersionId(versionId: string): { name: string; version: string } {
-  // Scoped packages contain an @ of their own, so split on the last one.
-  const at = versionId.lastIndexOf("@");
-  if (at <= 0) return { name: versionId, version: "" };
-  return { name: versionId.slice(0, at), version: versionId.slice(at + 1) };
-}
 
 export function DependencyChain({
   chain,
@@ -56,7 +49,7 @@ export function DependencyChain({
         )}
 
         {chain.map((versionId, index) => {
-          const { name, version } = splitVersionId(versionId);
+          const { name, version } = parseVersionId(versionId);
           const isFirst = index === 0;
           const isLast = index === chain.length - 1;
 
@@ -71,7 +64,7 @@ export function DependencyChain({
                       ? "border-line-strong bg-panel text-ink hover:border-accent/40"
                       : "border-line bg-bg-subtle text-ink-muted hover:text-ink"
                 }`}
-                title={isFirst ? "You declared this dependency" : undefined}
+                title={isFirst ? "Declared by the application" : undefined}
               >
                 {name}
                 {version && (
@@ -103,7 +96,7 @@ export function ChainLegend() {
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-faint">
       <span className="flex items-center gap-1.5">
         <span className="size-2.5 rounded-sm border border-line-strong bg-panel" />
-        you declared this
+        declared by the app
       </span>
       <span className="flex items-center gap-1.5">
         <span className="size-2.5 rounded-sm border border-line bg-bg-subtle" />

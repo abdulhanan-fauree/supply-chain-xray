@@ -3,18 +3,20 @@ import { Suspense } from "react";
 
 import { getVulnerabilityList, type VulnerabilityListRow } from "@/lib/queries/vulnerabilities";
 import { withDbFallback } from "@/components/db-error";
+import { PAGE_SIZE } from "@/lib/config";
 import { EmptyState, Panel, SeverityBadge, Skeleton } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * Every advisory reaching the portfolio, ranked by how many applications it
- * touches rather than by severity alone. A MODERATE in a package five apps share
- * is a bigger problem than a CRITICAL in one abandoned service, and sorting by
- * severity would bury it.
+ * Every advisory reaching the portfolio, ranked by blast radius before severity.
+ * A moderate issue in a package several applications share is a larger problem
+ * than a critical one in a single abandoned service.
  */
-const PAGE_SIZE = 25;
 
 export default async function VulnerabilitiesPage({
   searchParams,
@@ -53,17 +55,16 @@ async function List({ params }: { params: Record<string, string | string[] | und
     const multiApp = rows.filter((row) => row.appsReached > 1).length;
     const direct = rows.filter((row) => row.minDepth === 1).length;
 
-    // Stating the shape of the result honestly is more useful than a headline
-    // that implies overlap the data does not contain. In this portfolio the
-    // vulnerable versions are pinned old releases specific to one application,
-    // while the widely-shared packages are current and clean — so nothing spans
-    // two trees. That is a real finding about the dataset, not a missing feature.
+    // When nothing spans two applications, say so rather than leaving a headline
+    // that implies overlap the data does not contain. It is a real property of the
+    // portfolio: the vulnerable versions are pinned old releases specific to one
+    // application, while the widely-shared packages are all current.
     const description =
       multiApp > 0
         ? `${rows.length} reaching production trees. ${multiApp} touch more than one application; ${direct} sit in a dependency somebody declared directly.`
         : `${rows.length} reaching production trees, ${direct} of them in a dependency somebody declared directly. None spans two applications: the vulnerable versions here are pinned old releases specific to one app, while the packages several apps share are all current.`;
 
-    const page = paginate(rows, params.page as string | undefined, PAGE_SIZE);
+    const page = paginate(rows, params.page as string | undefined, PAGE_SIZE.advisories);
 
     return (
       <Panel title="Advisories" description={description}>

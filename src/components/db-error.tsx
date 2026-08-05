@@ -1,13 +1,16 @@
+import type { ReactNode } from "react";
+import { notFound } from "next/navigation";
+
 import { DB_ERROR_COPY, DbError, type DbErrorKind } from "@/lib/db";
 
 /**
- * The database-unreachable state, rendered as a real screen rather than a thrown
- * error. Each failure mode gets copy that tells you what to do next, which is
- * the difference between a useful error and a stack trace: "instance may be
- * paused" is actionable, "ServiceUnavailable" is not.
+ * Database failure as a rendered state rather than a thrown error.
  *
- * The raw database message is kept, but demoted into a details element — useful
- * when debugging, noise when you just want to know why the page is empty.
+ * Each failure mode gets copy that says what to do next, which is the difference
+ * between a useful error and a stack trace: "the instance may be paused" is
+ * actionable, "ServiceUnavailable" is not. The raw database message is kept but
+ * demoted — useful when debugging, noise when you only want to know why the page
+ * is empty.
  */
 export function DbErrorState({
   kind,
@@ -27,7 +30,13 @@ export function DbErrorState({
           aria-hidden="true"
           className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-high-soft text-high"
         >
-          <svg viewBox="0 0 20 20" fill="none" className="size-4" stroke="currentColor" strokeWidth="1.8">
+          <svg
+            viewBox="0 0 20 20"
+            fill="none"
+            className="size-4"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          >
             <path d="M10 6.5v4.2M10 13.6h.01" strokeLinecap="round" />
             <circle cx="10" cy="10" r="7.2" />
           </svg>
@@ -52,30 +61,58 @@ export function DbErrorState({
   );
 }
 
+function toErrorState(context: string, error: unknown): ReactNode {
+  if (error instanceof DbError) {
+    return <DbErrorState kind={error.kind} detail={error.detail} context={context} />;
+  }
+  // Not a database problem, so do not mislabel it as one.
+  return (
+    <DbErrorState
+      kind="query"
+      context={context}
+      detail={error instanceof Error ? (error.stack ?? error.message) : String(error)}
+    />
+  );
+}
+
 /**
- * Every page renders through this. A page either gets its data or gets an
- * explanation — it never gets a half-rendered shell or a Next.js error overlay,
- * which is what would happen if the driver's rejection were allowed to bubble.
+ * Render a data-dependent region, or an explanation of why it could not load.
+ *
+ * Every such region on every page goes through this, so a page either shows its
+ * data or says what went wrong — never a half-rendered shell or a framework error
+ * overlay.
  */
 export async function withDbFallback<T>(
   context: string,
   load: () => Promise<T>,
-  render: (data: T) => React.ReactNode,
-): Promise<React.ReactNode> {
+  render: (data: T) => ReactNode,
+): Promise<ReactNode> {
   try {
     return render(await load());
   } catch (error) {
-    if (error instanceof DbError) {
-      return <DbErrorState kind={error.kind} detail={error.detail} context={context} />;
-    }
-    // Not a database problem: an genuine application bug. Show it rather than
-    // silently mislabelling it as a connectivity issue.
-    return (
-      <DbErrorState
-        kind="query"
-        context={context}
-        detail={error instanceof Error ? (error.stack ?? error.message) : String(error)}
-      />
-    );
+    return toErrorState(context, error);
   }
+}
+
+/**
+ * Load the record a detail page is about.
+ *
+ * A page keyed on an id has to distinguish three outcomes: the record exists, it
+ * does not, or the database could not answer. Collapsing the last two into a 404
+ * would tell someone their advisory does not exist when the instance is merely
+ * paused, so a database failure renders the error state and only a genuine miss
+ * calls notFound().
+ */
+export async function loadOrNotFound<T>(
+  context: string,
+  load: () => Promise<T | null>,
+): Promise<{ data: T } | { errorState: ReactNode }> {
+  let record: T | null;
+  try {
+    record = await load();
+  } catch (error) {
+    return { errorState: toErrorState(context, error) };
+  }
+  if (record === null) notFound();
+  return { data: record };
 }

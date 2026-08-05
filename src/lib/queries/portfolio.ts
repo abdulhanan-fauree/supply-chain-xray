@@ -1,20 +1,19 @@
-import { read } from "../db";
-import { MAX_TRAVERSAL_DEPTH, SEVERITY_ORDER, type Severity } from "../model";
+import { MAX_TRAVERSAL_DEPTH } from "../config";
+import { read, readOne, type Row } from "../db";
+import {
+  countSeverities,
+  worstSeverity,
+  type SeverityCounts,
+} from "../severity";
+import type { Severity } from "../model";
 
 /**
- * The dashboard query: one row per application, each row summarising an entire
- * transitive dependency tree.
+ * Portfolio-level reads: the dashboard row per application, and graph totals.
  *
  * Reachability comes from the materialised (:App)-[:REACHES {depth}]->(:Version)
- * closure rather than a live walk. That is a measured decision, not a guess —
- * see ReachesEdge in model.ts, and the two notes below on what the free instance
- * is and is not fast at.
- *
- * The relational comparison still holds. Even with the closure materialised,
- * `worstSeverity` and the per-app advisory counts join reachability against
- * advisories whose applicability is a version-range predicate, and the longest
- * chain below is a genuine unbounded walk. In SQL the closure itself would be a
- * recursive CTE that has to be re-derived or maintained by triggers.
+ * closure rather than a live walk, which makes each figure an index seek per
+ * application instead of a traversal. See ReachesEdge in model.ts for why that
+ * closure exists and what is deliberately left live.
  */
 
 export type PortfolioRow = {
@@ -24,24 +23,21 @@ export type PortfolioRow = {
   description: string;
   directDeps: number;
   totalDeps: number;
-  /** Deepest nesting level: the furthest a dependency sits from the app. */
+  /** Deepest nesting level: how far the furthest dependency sits from the app. */
   nestingDepth: number;
-  /** Longest single dependency chain. A different number from nestingDepth. */
+  /**
+   * Longest single dependency chain. A different measure from nestingDepth — the
+   * longest route to a node is not the shortest one — so both are reported.
+   */
   longestChain: number;
-  /** Dependencies the app did not declare — pulled in by something else. */
+  /** Dependencies the application did not declare. */
   indirectDeps: number;
   vulnerableVersions: number;
   advisories: number;
   worstSeverity: Severity | null;
-  severityCounts: Record<Severity, number>;
+  severityCounts: SeverityCounts;
 };
 
-/**
- * Everything here is single-hop over REACHES, so it is an index seek per app
- * rather than a traversal. Measured at roughly 250ms for all six apps, against
- * 1043ms for the equivalent live-traversal version and a 20s timeout for the
- * per-pair shortestPath version this replaced.
- */
 const PORTFOLIO = `
 MATCH (app:App)
 
@@ -55,8 +51,8 @@ CALL {
 CALL {
   WITH app
   MATCH (app)-[r:REACHES]->(:Version)
-  RETURN count(r)          AS totalDeps,
-         max(r.depth)      AS nestingDepth,
+  RETURN count(r)     AS totalDeps,
+         max(r.depth) AS nestingDepth,
          count(CASE WHEN r.depth > 1 THEN 1 END) AS indirectDeps
 }
 
@@ -74,8 +70,8 @@ RETURN app.slug        AS slug,
        app.description AS description,
        directDeps,
        totalDeps,
-       coalesce(nestingDepth, 0) AS nestingDepth,
-       coalesce(indirectDeps, 0) AS indirectDeps,
+       nestingDepth,
+       indirectDeps,
        vulnerableVersions,
        advisories,
        severityPairs
@@ -83,17 +79,12 @@ ORDER BY advisories DESC, totalDeps DESC
 `;
 
 /**
- * The longest single dependency chain, which stays a live traversal.
+ * Longest chain per application, which stays a live traversal.
  *
- * `max(length(p))` is the cheap one here — 519ms for all six apps — which is the
- * opposite of what I assumed before measuring. On this engine a `shortestPath`
- * called once per (source, target) pair is what falls over, not path length over
- * a bounded variable-length match. Worth stating plainly because the intuition
- * carried over from other databases is wrong in this specific case.
- *
- * This is deliberately a different number from `nestingDepth`: orders-api nests
- * 5 levels deep but contains a 9-package chain, because the longest route to a
- * node is not the shortest one. Both are shown, labelled for what they are.
+ * `max(length(p))` over a bounded variable-length match is inexpensive on this
+ * engine, whereas a `shortestPath` evaluated per candidate pair is not — the
+ * opposite of the intuition carried over from other databases, and worth stating
+ * because the two look interchangeable.
  */
 const LONGEST_CHAIN = `
 MATCH (app:App)-[u:USES]->(root:Version)
@@ -102,62 +93,40 @@ MATCH p = (root)-[:DEPENDS_ON*0..${MAX_TRAVERSAL_DEPTH}]->(:Version)
 RETURN app.slug AS slug, max(length(p)) + 1 AS longestChain
 `;
 
-const EMPTY_SEVERITIES: Record<Severity, number> = {
-  CRITICAL: 0,
-  HIGH: 0,
-  MODERATE: 0,
-  LOW: 0,
-  UNKNOWN: 0,
-};
-
 export async function getPortfolio(): Promise<PortfolioRow[]> {
   const [rows, chains] = await Promise.all([
-    read(PORTFOLIO, {}, (record) => record),
-    read(LONGEST_CHAIN, {}, (record) => record),
+    read(PORTFOLIO, {}, (row) => row),
+    read(LONGEST_CHAIN, {}, (row) => [row.string("slug"), row.count("longestChain")] as const),
   ]);
 
-  const chainBySlug = new Map<string, number>(
-    chains.map((row) => [row.slug as string, (row.longestChain as number) ?? 0]),
-  );
+  const chainBySlug = new Map(chains);
 
   return rows.map((row) => {
-    // Pairs rather than a bare severity list: collecting severities alone would
-    // count one advisory once per affected version it touches, so a single CVE
-    // in a widely-shared package would dominate the histogram.
-    const pairs = (row.severityPairs ?? []) as Array<[string, string]>;
-    const severityCounts = { ...EMPTY_SEVERITIES };
-    for (const [, severity] of pairs) {
-      const key: Severity = severity in severityCounts ? (severity as Severity) : "UNKNOWN";
-      severityCounts[key] += 1;
-    }
+    // Advisory/severity pairs rather than a bare severity list: an advisory
+    // affecting several versions of the same package would otherwise be counted
+    // once per version and dominate the histogram.
+    const severities = row.pairs("severityPairs").map(([, severity]) => severity);
+    const severityCounts = countSeverities(severities);
+    const slug = row.string("slug");
 
-    const worstSeverity =
-      (Object.entries(severityCounts)
-        .filter(([, count]) => count > 0)
-        .sort(
-          ([a], [b]) => SEVERITY_ORDER[a as Severity] - SEVERITY_ORDER[b as Severity],
-        )[0]?.[0] as Severity | undefined) ?? null;
-
-    const slug = row.slug as string;
     return {
       slug,
-      name: row.name as string,
-      kind: row.kind as string,
-      description: row.description as string,
-      directDeps: row.directDeps as number,
-      totalDeps: row.totalDeps as number,
-      nestingDepth: row.nestingDepth as number,
+      name: row.string("name"),
+      kind: row.string("kind"),
+      description: row.string("description"),
+      directDeps: row.count("directDeps"),
+      totalDeps: row.count("totalDeps"),
+      nestingDepth: row.count("nestingDepth"),
       longestChain: chainBySlug.get(slug) ?? 0,
-      indirectDeps: row.indirectDeps as number,
-      vulnerableVersions: row.vulnerableVersions as number,
-      advisories: row.advisories as number,
-      worstSeverity,
+      indirectDeps: row.count("indirectDeps"),
+      vulnerableVersions: row.count("vulnerableVersions"),
+      advisories: row.count("advisories"),
+      worstSeverity: worstSeverity(severities),
       severityCounts,
     };
   });
 }
 
-/** Graph-wide totals for the dashboard header. */
 export type GraphTotals = {
   packages: number;
   versions: number;
@@ -175,19 +144,24 @@ CALL { MATCH (n:Vulnerability) RETURN count(n) AS advisories }
 RETURN packages, versions, dependencies, maintainers, advisories
 `;
 
+const EMPTY_TOTALS: GraphTotals = {
+  packages: 0,
+  versions: 0,
+  dependencies: 0,
+  maintainers: 0,
+  advisories: 0,
+};
+
 export async function getGraphTotals(): Promise<GraphTotals> {
-  const rows = await read(TOTALS, {}, (record) => ({
-    packages: record.packages as number,
-    versions: record.versions as number,
-    dependencies: record.dependencies as number,
-    maintainers: record.maintainers as number,
-    advisories: record.advisories as number,
+  const totals = await readOne(TOTALS, {}, (row: Row) => ({
+    packages: row.count("packages"),
+    versions: row.count("versions"),
+    dependencies: row.count("dependencies"),
+    maintainers: row.count("maintainers"),
+    advisories: row.count("advisories"),
   }));
-  return rows[0] ?? { packages: 0, versions: 0, dependencies: 0, maintainers: 0, advisories: 0 };
+  return totals ?? EMPTY_TOTALS;
 }
 
-/**
- * Exported so the /queries page renders the exact text that runs, rather than a
- * transcription of it that quietly drifts out of date.
- */
+/** Exported so /queries renders the text that runs, not a transcription of it. */
 export const PORTFOLIO_CYPHER = { PORTFOLIO, LONGEST_CHAIN, TOTALS };

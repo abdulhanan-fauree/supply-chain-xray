@@ -1,46 +1,41 @@
 /**
- * Builds the dataset: breadth-first walk of six real dependency trees, then
- * enrichment with maintainers, licenses, download counts and OSV advisories.
+ * Builds data/graph.json: a breadth-first walk of six real dependency trees,
+ * enriched with maintainers, licenses, download counts and OSV advisories.
  *
- * Run:  npm run crawl          (writes data/graph.json)
- *       npm run crawl -- --max-packages 400 --max-depth 6
+ *   npm run crawl
+ *   npm run crawl -- --max-packages 2000 --max-depth 8 --concurrency 12
  *
- * Needs no database. The output is data/graph.json, the committed artifact that
- * `npm run seed` loads into CognoDB. Keeping the two steps separate means a
- * registry outage cannot leave the graph half-written, and a reviewer with no
- * network can still seed. The output is deterministic — same manifests in, same
- * bytes out — which is what makes that artifact trustworthy; see sortDataset and
- * the cap-check note in run() for the two things that had to be fixed for that
- * to hold.
+ * Touches no database. Keeping dataset construction separate from loading means a
+ * registry outage cannot leave the graph half-written, and the committed artifact
+ * lets anyone seed with no network access.
  *
- * Modelling decisions worth knowing about:
- *
- *   - The tree is an *install* tree, not a manifest tree. Ranges are resolved to
- *     the single version npm would pick (highest satisfying), so the graph
- *     describes what actually ends up on disk.
- *   - devDependencies are followed only from the root apps. npm does not install
- *     the dev dependencies of your dependencies, so following them would inflate
- *     the graph with edges that do not exist in any real install.
- *   - peerDependencies are not followed. A peer is satisfied by a version
- *     already elsewhere in the tree; adding an edge for it would double-count.
+ * The output is deterministic: the same manifests produce the same bytes. That
+ * relies on two things — the package budget being checked between levels rather
+ * than within one (see Crawler.expandLevel) and every collection being sorted
+ * before serialisation (see sortDataset).
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import semver from "semver";
 
-import { MANIFESTS, manifestNodes, type Manifest } from "./lib/manifests";
-import {
-  categoriseLicense,
-  getLatestDoc,
-  getPackument,
-  getVersionDoc,
-  getWeeklyDownloads,
-  normaliseLicense,
-  packageNodeFrom,
-  parseRepo,
-  type Packument,
-} from "./lib/registry";
+import { MAX_TRAVERSAL_DEPTH } from "../src/lib/config";
+import type {
+  AffectsEdge,
+  GraphDataset,
+  HasVersionEdge,
+  HostedInEdge,
+  LicenseNode,
+  LicensedUnderEdge,
+  MaintainerNode,
+  MaintainsEdge,
+  PackageNode,
+  RepoNode,
+} from "../src/lib/model";
+import { formatVersionId } from "../src/lib/version-id";
+import { Crawler, type CrawlOptions } from "./lib/crawler";
+import { sortDataset, summariseDataset } from "./lib/dataset";
+import { mapLimit, stats as httpStats } from "./lib/http";
+import { manifestNodes } from "./lib/manifests";
 import {
   dedupeByAliasCluster,
   fetchAdvisories,
@@ -48,300 +43,192 @@ import {
   queryAdvisoryIds,
   toVulnerabilityNode,
 } from "./lib/osv";
-import { mapLimit, stats as httpStats } from "./lib/http";
+import { computeReachability } from "./lib/reachability";
 import {
-  MAX_TRAVERSAL_DEPTH,
-  type AffectsEdge,
-  type DependsOnEdge,
-  type GraphDataset,
-  type HasVersionEdge,
-  type HostedInEdge,
-  type LicenseNode,
-  type LicensedUnderEdge,
-  type MaintainerNode,
-  type MaintainsEdge,
-  type PackageNode,
-  type ReachesEdge,
-  type RepoNode,
-  type UsesEdge,
-  type VersionNode,
-} from "../src/lib/model";
+  categoriseLicense,
+  getLatestDoc,
+  getVersionDoc,
+  getWeeklyDownloads,
+  normaliseLicense,
+  packageNodeFrom,
+  parseRepo,
+  type VersionDoc,
+} from "./lib/registry";
 
-type Options = { maxPackages: number; maxDepth: number; concurrency: number };
+/** Sized for a 256 MB instance: lands around 1-2k versions and 10k relationships. */
+const DEFAULT_MAX_PACKAGES = 900;
+const DEFAULT_CONCURRENCY = 8;
 
-function parseOptions(argv: string[]): Options {
-  const read = (flag: string, fallback: number) => {
-    const index = argv.indexOf(flag);
+function parseOptions(argv: readonly string[]): CrawlOptions {
+  const flag = (name: string, fallback: number) => {
+    const index = argv.indexOf(name);
     if (index === -1) return fallback;
     const value = Number(argv[index + 1]);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
   };
   return {
-    // Sized for the free c0 instance: 256 MB RAM and 1 GB disk. This lands
-    // around 1-2k versions and 10-20k relationships, which is plenty to make
-    // the traversals interesting without making them slow.
-    maxPackages: read("--max-packages", 900),
-    maxDepth: read("--max-depth", MAX_TRAVERSAL_DEPTH),
-    concurrency: read("--concurrency", 8),
+    maxPackages: flag("--max-packages", DEFAULT_MAX_PACKAGES),
+    maxDepth: flag("--max-depth", MAX_TRAVERSAL_DEPTH),
+    concurrency: flag("--concurrency", DEFAULT_CONCURRENCY),
   };
 }
 
-/** Ranges npm accepts that are not semver and cannot be resolved to a version. */
-function isResolvableRange(range: string): boolean {
-  return !/^(git|git\+|https?:|file:|link:|workspace:|npm:|github:|[\w-]+\/[\w.-]+$)/.test(range.trim());
-}
+const log = (message: string) => process.stdout.write(`${message}\n`);
 
-class Crawler {
-  private readonly packumentCache = new Map<string, Packument | null>();
-
-  readonly versions = new Map<string, VersionNode>();
-  readonly dependsOn = new Map<string, DependsOnEdge>();
-  readonly uses: UsesEdge[] = [];
-  readonly unresolved: Array<{ from: string; name: string; range: string; reason: string }> = [];
-
-  private maxDepthReached = 0;
-
-  constructor(private readonly options: Options) {}
-
-  private async packument(name: string): Promise<Packument | null> {
-    if (this.packumentCache.has(name)) return this.packumentCache.get(name) ?? null;
-    const doc = await getPackument(name).catch(() => null);
-    this.packumentCache.set(name, doc);
-    return doc;
-  }
-
-  /** Stable, published versions in descending semver order. */
-  private stableVersions(packument: Packument): string[] {
-    return semver.rsort(
-      Object.keys(packument.versions).filter((v) => semver.valid(v) && !semver.prerelease(v)),
-    );
-  }
-
-  /**
-   * Resolve a range the way npm would: the highest published version that
-   * satisfies it. Falls back to including prereleases only if nothing stable
-   * matches, which is what happens for packages that only ship prereleases.
-   */
-  private async resolve(
-    name: string,
-    range: string,
-  ): Promise<{ node: VersionNode; entryDeps: Packument["versions"][string] } | { error: string }> {
-    if (!isResolvableRange(range)) return { error: "non-registry range" };
-
-    const packument = await this.packument(name);
-    if (!packument) return { error: "package not found in registry" };
-
-    const stable = this.stableVersions(packument);
-    const all = Object.keys(packument.versions).filter((v) => semver.valid(v));
-    const wanted = range.trim() === "" || range.trim() === "latest" ? "*" : range.trim();
-
-    let picked =
-      semver.maxSatisfying(stable, wanted, { includePrerelease: false }) ??
-      semver.maxSatisfying(all, wanted, { includePrerelease: true });
-
-    // A pinned version that has since been unpublished still deserves a node —
-    // legacy-admin's whole point is sitting on versions nobody maintains.
-    if (!picked && semver.valid(wanted)) picked = wanted;
-    if (!picked) return { error: `no published version satisfies ${range}` };
-
-    const entry = packument.versions[picked];
-    if (!entry) return { error: `version ${picked} missing from packument` };
-
-    const id = `${name}@${picked}`;
-    const existing = this.versions.get(id);
-    if (existing) return { node: existing, entryDeps: entry };
-
-    const latest = packument["dist-tags"]?.latest ?? null;
-    const node: VersionNode = {
-      id,
-      packageName: name,
-      version: picked,
-      releasesBehind: stable.filter((v) => semver.gt(v, picked!)).length,
-      isLatest: latest === picked,
-      deprecated: Boolean(entry.deprecated),
-    };
-    this.versions.set(id, node);
-    return { node, entryDeps: entry };
-  }
-
-  private addDependsOn(from: string, to: string, range: string, optional: boolean): void {
-    const key = `${from}|${to}`;
-    if (!this.dependsOn.has(key)) {
-      this.dependsOn.set(key, { fromVersionId: from, toVersionId: to, range, optional });
-    }
-  }
-
-  /** Depth 0: the apps' own manifests, where dev dependencies do count. */
-  private async seedRoots(): Promise<string[]> {
-    const frontier: string[] = [];
-
-    for (const manifest of MANIFESTS) {
-      const direct: Array<[string, string, boolean]> = [
-        ...Object.entries(manifest.dependencies).map(
-          ([name, range]) => [name, range, false] as [string, string, boolean],
-        ),
-        ...Object.entries(manifest.devDependencies).map(
-          ([name, range]) => [name, range, true] as [string, string, boolean],
-        ),
-      ];
-
-      await mapLimit(direct, this.options.concurrency, async ([name, range, dev]) => {
-        const result = await this.resolve(name, range);
-        if ("error" in result) {
-          this.unresolved.push({ from: manifest.slug, name, range, reason: result.error });
-          return;
-        }
-        this.uses.push({ appSlug: manifest.slug, versionId: result.node.id, range, dev });
-        frontier.push(result.node.id);
-      });
-    }
-
-    // Sorted so every run walks the graph in the same order.
-    return [...new Set(frontier)].sort();
-  }
-
-  async run(): Promise<void> {
-    process.stdout.write("Resolving direct dependencies of 6 apps\n");
-    let frontier = await this.seedRoots();
-    process.stdout.write(`  depth 0: ${frontier.length} direct dependencies\n`);
-
-    for (let depth = 1; depth <= this.options.maxDepth; depth += 1) {
-      if (!frontier.length) break;
-      if (this.uniquePackageCount() >= this.options.maxPackages) {
-        process.stdout.write(
-          `  stopping at depth ${depth}: package cap (${this.options.maxPackages}) reached\n`,
-        );
-        break;
-      }
-
-      const next = new Set<string>();
-
-      // The cap is checked between levels, never inside this loop. Checking it
-      // mid-level made the crawl non-deterministic: concurrent workers observed
-      // different package counts depending on interleaving, so two runs of the
-      // same manifests produced graphs that differed by a couple of packages and
-      // — because those packages carried advisories — by rather more than that
-      // downstream. A whole level is now always completed, which can overshoot
-      // the cap slightly. That is the right trade: the cap is a budget, and a
-      // reproducible dataset is a correctness property.
-      await mapLimit(frontier, this.options.concurrency, async (versionId) => {
-        const node = this.versions.get(versionId);
-        if (!node) return;
-        const packument = await this.packument(node.packageName);
-        const entry = packument?.versions[node.version];
-        if (!entry) return;
-
-        const deps: Array<[string, string, boolean]> = [
-          ...Object.entries(entry.dependencies ?? {}).map(
-            ([name, range]) => [name, range, false] as [string, string, boolean],
-          ),
-          ...Object.entries(entry.optionalDependencies ?? {}).map(
-            ([name, range]) => [name, range, true] as [string, string, boolean],
-          ),
-        ];
-
-        for (const [name, range, optional] of deps) {
-          const result = await this.resolve(name, range);
-          if ("error" in result) {
-            this.unresolved.push({ from: versionId, name, range, reason: result.error });
-            continue;
-          }
-          this.addDependsOn(versionId, result.node.id, range, optional);
-          next.add(result.node.id);
-        }
-      });
-
-      // Only versions we have not already expanded advance to the next level,
-      // sorted so the next level is walked in a stable order too.
-      frontier = [...next].filter((id) => !this.expanded.has(id)).sort();
-      frontier.forEach((id) => this.expanded.add(id));
-      this.maxDepthReached = Math.max(this.maxDepthReached, depth);
-      process.stdout.write(
-        `  depth ${depth}: +${frontier.length} new versions (${this.versions.size} total, ${this.dependsOn.size} edges)\n`,
-      );
-    }
-  }
-
-  private readonly expanded = new Set<string>();
-
-  /** Sorted, so batching for OSV and downloads is stable across runs. */
-  packageNames(): string[] {
-    return [...new Set([...this.versions.values()].map((v) => v.packageName))].sort();
-  }
-
-  private uniquePackageCount(): number {
-    return new Set([...this.versions.values()].map((v) => v.packageName)).size;
-  }
-
-  depthReached(): number {
-    return this.maxDepthReached;
-  }
-}
-
-async function main() {
-  const options = parseOptions(process.argv.slice(2));
-  const started = Date.now();
-
-  const crawler = new Crawler(options);
-  await crawler.run();
-
+/**
+ * Package-level metadata, per-version licenses, and download counts.
+ *
+ * Three registry endpoints, each chosen deliberately:
+ *
+ *   - `/<pkg>/latest` for the *current* maintainer list, description and
+ *     repository. Current rather than historical, because the trust question is
+ *     who can publish today, not who could when an old version shipped.
+ *   - `/<pkg>/<version>` for the licence of that specific version. A package's
+ *     licence can change between releases, and applications pinning old releases
+ *     are exactly the ones the licence query is about. Skipped when the resolved
+ *     version is latest, since that document is already in hand.
+ *   - the bulk downloads API, which rejects scoped names, so those go one at a
+ *     time.
+ */
+async function enrich(crawler: Crawler, concurrency: number) {
   const packageNames = crawler.packageNames();
-  process.stdout.write(`\nEnriching ${packageNames.length} packages\n`);
+  log(`\nEnriching ${packageNames.length} packages`);
 
-  // Current metadata: maintainers, description, repository, homepage.
   const latestDocs = new Map(
-    await mapLimit(packageNames, options.concurrency, async (name) => {
+    await mapLimit(packageNames, concurrency, async (name) => {
       const doc = await getLatestDoc(name).catch(() => null);
       return [name, doc] as const;
     }),
   );
-  process.stdout.write(`  fetched ${latestDocs.size} package metadata documents\n`);
+  log(`  fetched ${latestDocs.size} package metadata documents`);
 
   const downloads = await getWeeklyDownloads(packageNames);
-  process.stdout.write(`  fetched download counts for ${downloads.size} packages\n`);
+  log(`  fetched download counts for ${downloads.size} packages`);
 
-  // Per-version licenses. Skipped when the resolved version *is* latest, since
-  // that document is already in hand.
-  const versionList = [...crawler.versions.values()];
+  const versions = [...crawler.versions.values()];
   const licenseByVersion = new Map(
-    await mapLimit(versionList, options.concurrency, async (version) => {
+    await mapLimit(versions, concurrency, async (version) => {
       const latest = latestDocs.get(version.packageName) ?? null;
-      const doc =
+      const doc: VersionDoc | null =
         latest && latest.version === version.version
           ? latest
           : await getVersionDoc(version.packageName, version.version).catch(() => null);
       return [version.id, normaliseLicense(doc ?? latest)] as const;
     }),
   );
-  process.stdout.write(`  resolved licenses for ${licenseByVersion.size} versions\n`);
+  log(`  resolved licenses for ${licenseByVersion.size} versions`);
 
-  // Advisories.
-  process.stdout.write(`\nQuerying OSV for ${packageNames.length} packages\n`);
-  const advisoryIdsByPackage = await queryAdvisoryIds(packageNames);
-  const allIds = [...new Set([...advisoryIdsByPackage.values()].flat())];
-  process.stdout.write(
-    `  ${advisoryIdsByPackage.size} packages carry advisories, ${allIds.length} distinct advisories\n`,
-  );
-  const rawAdvisories = await fetchAdvisories(allIds);
-  const { canonical: advisories, canonicalIdOf } = dedupeByAliasCluster(rawAdvisories);
-  process.stdout.write(
-    `  collapsed ${rawAdvisories.length} records into ${advisories.length} distinct issues by alias cluster\n`,
-  );
-  const advisoryById = new Map(advisories.map((a) => [a.id, a]));
+  return { packageNames, latestDocs, downloads, licenseByVersion, versions };
+}
 
-  // Build node and edge collections.
-  const packages: PackageNode[] = packageNames.map((name) =>
-    packageNodeFrom(name, latestDocs.get(name) ?? null, null, downloads.get(name) ?? null),
+/**
+ * Match advisories to the versions actually in the graph.
+ *
+ * Matching runs against every raw OSV record rather than only the survivor of each
+ * alias cluster: collapsed records sometimes declare a *wider* vulnerable range
+ * than the one that wins, and dropping their ranges would under-report. Results
+ * are attributed to the canonical id, and where a cluster disagrees about the fix
+ * the highest fixed version wins — that is the one clearing every record in it.
+ */
+async function collectAdvisories(
+  packageNames: readonly string[],
+  versionsByPackage: ReadonlyMap<string, string[]>,
+) {
+  log(`\nQuerying OSV for ${packageNames.length} packages`);
+  const idsByPackage = await queryAdvisoryIds([...packageNames]);
+  const allIds = [...new Set([...idsByPackage.values()].flat())];
+  log(
+    `  ${idsByPackage.size} packages carry advisories, ${allIds.length} distinct records`,
   );
-  // latestVersion comes from dist-tags, which lives on the packument; the latest
-  // doc's own version is the same value, so read it from there.
-  for (const pkg of packages) {
-    pkg.latestVersion = latestDocs.get(pkg.name)?.version ?? pkg.latestVersion;
+
+  const rawRecords = await fetchAdvisories(allIds);
+  const { canonical, canonicalIdOf } = dedupeByAliasCluster(rawRecords);
+  log(`  collapsed ${rawRecords.length} records into ${canonical.length} distinct issues`);
+
+  const rawById = new Map(rawRecords.map((record) => [record.id, record]));
+  const canonicalById = new Map(canonical.map((record) => [record.id, record]));
+  const affectsByKey = new Map<string, AffectsEdge>();
+  const usedIds = new Set<string>();
+
+  for (const [packageName, ids] of idsByPackage) {
+    const candidates = versionsByPackage.get(packageName);
+    if (!candidates?.length) continue;
+
+    for (const id of ids) {
+      const record = rawById.get(id);
+      if (!record) continue;
+      const osvId = canonicalIdOf.get(id) ?? id;
+      if (!canonicalById.has(osvId)) continue;
+
+      for (const match of matchAffectedVersions(record, packageName, candidates)) {
+        const versionId = formatVersionId(packageName, match.version);
+        const key = `${osvId}|${versionId}`;
+        const existing = affectsByKey.get(key);
+
+        if (!existing) {
+          affectsByKey.set(key, {
+            osvId,
+            versionId,
+            vulnerableRange: match.vulnerableRange,
+            fixedIn: match.fixedIn,
+          });
+        } else {
+          existing.fixedIn = highestFix(existing.fixedIn, match.fixedIn);
+          if (!existing.vulnerableRange.includes(match.vulnerableRange)) {
+            existing.vulnerableRange = `${existing.vulnerableRange} || ${match.vulnerableRange}`;
+          }
+        }
+        usedIds.add(osvId);
+      }
+    }
   }
 
-  const hasVersion: HasVersionEdge[] = versionList.map((v) => ({
-    packageName: v.packageName,
-    versionId: v.id,
+  // Only advisories that hit a version in the graph become nodes; an advisory for
+  // a version nobody installs is noise.
+  const vulnerabilities = canonical
+    .filter((record) => usedIds.has(record.id))
+    .map(toVulnerabilityNode);
+
+  return { vulnerabilities, affects: [...affectsByKey.values()] };
+}
+
+function highestFix(current: string | null, candidate: string | null): string | null {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  // String compare is insufficient across major versions, so compare numerically.
+  const parts = (value: string) => value.split(/[.+-]/).map((part) => Number(part) || 0);
+  const left = parts(candidate);
+  const right = parts(current);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference > 0 ? candidate : current;
+  }
+  return current;
+}
+
+async function main() {
+  const options = parseOptions(process.argv.slice(2));
+  const startedAt = Date.now();
+
+  const crawler = new Crawler(options);
+  await crawler.run(log);
+
+  const { packageNames, latestDocs, downloads, licenseByVersion, versions } = await enrich(
+    crawler,
+    options.concurrency,
+  );
+
+  const packages: PackageNode[] = packageNames.map((name) => {
+    const doc = latestDocs.get(name) ?? null;
+    const node = packageNodeFrom(name, doc, null, downloads.get(name) ?? null);
+    // dist-tags live on the packument; the latest document's own version is the
+    // same value and is already in hand.
+    return { ...node, latestVersion: doc?.version ?? node.latestVersion };
+  });
+
+  const hasVersion: HasVersionEdge[] = versions.map((version) => ({
+    packageName: version.packageName,
+    versionId: version.id,
   }));
 
   const licenses = new Map<string, LicenseNode>();
@@ -357,113 +244,54 @@ async function main() {
   const maintains: MaintainsEdge[] = [];
   const repos = new Map<string, RepoNode>();
   const hostedIn: HostedInEdge[] = [];
+
   for (const name of packageNames) {
-    const doc = latestDocs.get(name);
+    const doc = latestDocs.get(name) ?? null;
     for (const maintainer of doc?.maintainers ?? []) {
       const npmUser = maintainer.name?.trim();
       if (!npmUser) continue;
       if (!maintainers.has(npmUser)) maintainers.set(npmUser, { npmUser });
       maintains.push({ npmUser, packageName: name });
     }
-    const repo = parseRepo(doc ?? null);
+    const repo = parseRepo(doc);
     if (repo) {
       if (!repos.has(repo.id)) repos.set(repo.id, repo);
       hostedIn.push({ packageName: name, repoId: repo.id });
     }
   }
 
-  // AFFECTS: only for versions actually in the graph, and only where the
-  // advisory's own range says so.
   const versionsByPackage = new Map<string, string[]>();
-  for (const version of versionList) {
-    const list = versionsByPackage.get(version.packageName) ?? [];
-    list.push(version.version);
-    versionsByPackage.set(version.packageName, list);
+  for (const version of versions) {
+    const list = versionsByPackage.get(version.packageName);
+    if (list) list.push(version.version);
+    else versionsByPackage.set(version.packageName, [version.version]);
   }
 
-  // Matching runs against every raw record, not just the cluster survivor:
-  // collapsed records sometimes declare a *wider* vulnerable range than the one
-  // that wins, and dropping their ranges would under-report. Results are then
-  // attributed to the canonical id, and where a cluster disagrees about the fix
-  // we keep the highest fixed version — that is the one that actually clears
-  // every record in the cluster.
-  const rawById = new Map(rawAdvisories.map((a) => [a.id, a]));
-  const affectsByKey = new Map<string, AffectsEdge>();
-  const usedAdvisoryIds = new Set<string>();
+  const { vulnerabilities, affects } = await collectAdvisories(packageNames, versionsByPackage);
 
-  for (const [packageName, ids] of advisoryIdsByPackage) {
-    const candidates = versionsByPackage.get(packageName) ?? [];
-    if (!candidates.length) continue;
-
-    for (const id of ids) {
-      const advisory = rawById.get(id);
-      if (!advisory) continue;
-      const osvId = canonicalIdOf.get(id) ?? id;
-      if (!advisoryById.has(osvId)) continue;
-
-      for (const match of matchAffectedVersions(advisory, packageName, candidates)) {
-        const versionId = `${packageName}@${match.version}`;
-        const key = `${osvId}|${versionId}`;
-        const existing = affectsByKey.get(key);
-
-        if (!existing) {
-          affectsByKey.set(key, {
-            osvId,
-            versionId,
-            vulnerableRange: match.vulnerableRange,
-            fixedIn: match.fixedIn,
-          });
-        } else {
-          if (
-            match.fixedIn &&
-            (!existing.fixedIn ||
-              (semver.valid(match.fixedIn) &&
-                semver.valid(existing.fixedIn) &&
-                semver.gt(match.fixedIn, existing.fixedIn)))
-          ) {
-            existing.fixedIn = match.fixedIn;
-          }
-          if (!existing.vulnerableRange.includes(match.vulnerableRange)) {
-            existing.vulnerableRange = `${existing.vulnerableRange} || ${match.vulnerableRange}`;
-          }
-        }
-        usedAdvisoryIds.add(osvId);
-      }
-    }
-  }
-
-  const affects: AffectsEdge[] = [...affectsByKey.values()];
-
-  // Only advisories that hit a version in the graph become nodes. An advisory
-  // for a version nobody installs is noise, not signal.
-  const vulnerabilities = advisories
-    .filter((a) => usedAdvisoryIds.has(a.id))
-    .map(toVulnerabilityNode);
-
-  const reaches = computeReachability(crawler.uses, [...crawler.dependsOn.values()]);
-  process.stdout.write(
-    `\n  materialised ${reaches.length} (app, version) reachability pairs, max nesting depth ${Math.max(
-      0,
-      ...reaches.map((r) => r.depth),
-    )}\n`,
+  const dependsOn = [...crawler.dependsOn.values()];
+  const reaches = computeReachability(crawler.uses, dependsOn);
+  log(
+    `\n  materialised ${reaches.length} reachability pairs, ` +
+      `max nesting depth ${Math.max(0, ...reaches.map((edge) => edge.depth))}`,
   );
 
   const dataset: GraphDataset = {
     generatedAt: new Date().toISOString(),
     stats: {
       packages: packages.length,
-      versions: versionList.length,
-      dependsOn: crawler.dependsOn.size,
+      versions: versions.length,
+      dependsOn: dependsOn.length,
       vulnerabilities: vulnerabilities.length,
       affects: affects.length,
       maintainers: maintainers.size,
-      maxDepthReached: crawler.depthReached(),
+      maxDepthReached: crawler.maxDepthReached(),
       unresolved: crawler.unresolved.length,
       reaches: reaches.length,
     },
     apps: manifestNodes(),
     packages,
-    versions: versionList,
+    versions,
     maintainers: [...maintainers.values()],
     licenses: [...licenses.values()],
     repos: [...repos.values()],
@@ -471,7 +299,7 @@ async function main() {
     uses: crawler.uses,
     reaches,
     hasVersion,
-    dependsOn: [...crawler.dependsOn.values()],
+    dependsOn,
     licensedUnder,
     maintains,
     hostedIn,
@@ -480,157 +308,27 @@ async function main() {
 
   sortDataset(dataset);
 
-  mkdirSync(resolve(process.cwd(), "data"), { recursive: true });
-  const outPath = resolve(process.cwd(), "data/graph.json");
-  writeFileSync(outPath, JSON.stringify(dataset, null, 2));
+  const dataDir = resolve(process.cwd(), "data");
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(resolve(dataDir, "graph.json"), JSON.stringify(dataset, null, 2));
 
-  const seconds = ((Date.now() - started) / 1000).toFixed(1);
-  process.stdout.write(
-    [
-      "",
-      `Wrote ${outPath}`,
-      "",
-      `  apps               ${dataset.apps.length}`,
-      `  packages           ${dataset.stats.packages}`,
-      `  versions           ${dataset.stats.versions}`,
-      `  DEPENDS_ON         ${dataset.stats.dependsOn}`,
-      `  maintainers        ${dataset.stats.maintainers}`,
-      `  licenses           ${dataset.licenses.length}`,
-      `  repos              ${dataset.repos.length}`,
-      `  vulnerabilities    ${dataset.stats.vulnerabilities}`,
-      `  AFFECTS            ${dataset.stats.affects}`,
-      `  max depth reached  ${dataset.stats.maxDepthReached}`,
-      `  unresolved ranges  ${dataset.stats.unresolved}`,
-      "",
-      `  http: ${httpStats.hits} cache hits, ${httpStats.misses} fetched, ${httpStats.failures} failed`,
-      `  took ${seconds}s`,
-      "",
-    ].join("\n"),
+  log(`\nWrote data/graph.json\n\n${summariseDataset(dataset)}`);
+  log(
+    `\n  http: ${httpStats.hits} cache hits, ${httpStats.misses} fetched, ` +
+      `${httpStats.failures} failed`,
   );
+  log(`  took ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`);
 
-  if (crawler.unresolved.length) {
-    const unresolved = [...crawler.unresolved].sort((a, b) =>
+  if (crawler.unresolved.length > 0) {
+    const sorted = [...crawler.unresolved].sort((a, b) =>
       `${a.from}|${a.name}`.localeCompare(`${b.from}|${b.name}`),
     );
-    writeFileSync(
-      resolve(process.cwd(), "data/unresolved.json"),
-      JSON.stringify(unresolved, null, 2),
-    );
-    process.stdout.write(
-      `  ${crawler.unresolved.length} unresolvable range(s) recorded in data/unresolved.json\n\n`,
-    );
+    writeFileSync(resolve(dataDir, "unresolved.json"), JSON.stringify(sorted, null, 2));
+    log(`  ${sorted.length} unresolvable range(s) recorded in data/unresolved.json\n`);
   }
-}
-
-/**
- * Sort every collection in place, so the committed dataset is byte-stable.
- *
- * The crawl fans out across concurrent workers, so collections are populated in
- * whatever order responses arrive. The resulting graph is identical either way —
- * same nodes, same edges — but the JSON is not, which makes `data/graph.json`
- * produce meaningless diffs and makes "the dataset is reproducible" impossible to
- * demonstrate. Sorting is the last step before writing, and every collection is
- * ordered by the key that makes it unique.
- */
-function sortDataset(dataset: GraphDataset): void {
-  const by =
-    <T>(...keys: Array<(row: T) => string | number>) =>
-    (a: T, b: T): number => {
-      for (const key of keys) {
-        const left = key(a);
-        const right = key(b);
-        if (left < right) return -1;
-        if (left > right) return 1;
-      }
-      return 0;
-    };
-
-  dataset.apps.sort(by((a) => a.slug));
-  dataset.packages.sort(by((p) => p.name));
-  dataset.versions.sort(by((v) => v.id));
-  dataset.maintainers.sort(by((m) => m.npmUser));
-  dataset.licenses.sort(by((l) => l.spdxId));
-  dataset.repos.sort(by((r) => r.id));
-  dataset.vulnerabilities.sort(by((v) => v.osvId));
-
-  dataset.uses.sort(by((u) => u.appSlug, (u) => u.versionId));
-  dataset.reaches.sort(by((r) => r.appSlug, (r) => r.versionId));
-  dataset.hasVersion.sort(by((h) => h.packageName, (h) => h.versionId));
-  dataset.dependsOn.sort(by((d) => d.fromVersionId, (d) => d.toVersionId));
-  dataset.licensedUnder.sort(by((l) => l.versionId, (l) => l.spdxId));
-  dataset.maintains.sort(by((m) => m.npmUser, (m) => m.packageName));
-  dataset.hostedIn.sort(by((h) => h.packageName, (h) => h.repoId));
-  dataset.affects.sort(by((a) => a.osvId, (a) => a.versionId));
-}
-
-/**
- * One breadth-first sweep per app over the production install tree, recording
- * the minimum hop count to every reachable version.
- *
- * BFS visits each node once at its shortest distance, which is exactly the
- * number a per-pair `shortestPath` would compute — only here it is one sweep
- * from each of six sources rather than ~730 independent searches. Measured on
- * the free instance, the query form times out at 20s; this runs in under a
- * millisecond. See the ReachesEdge doc comment for why it is materialised rather
- * than asked live.
- *
- * Dev dependencies are excluded at the root, matching every other traversal in
- * the app: they are not installed in production, so they are not part of the
- * tree whose depth we are reporting.
- */
-function computeReachability(uses: UsesEdge[], dependsOn: DependsOnEdge[]): ReachesEdge[] {
-  const adjacency = new Map<string, string[]>();
-  for (const edge of dependsOn) {
-    const neighbours = adjacency.get(edge.fromVersionId) ?? [];
-    neighbours.push(edge.toVersionId);
-    adjacency.set(edge.fromVersionId, neighbours);
-  }
-
-  const rootsByApp = new Map<string, string[]>();
-  for (const edge of uses) {
-    if (edge.dev) continue;
-    const roots = rootsByApp.get(edge.appSlug) ?? [];
-    roots.push(edge.versionId);
-    rootsByApp.set(edge.appSlug, roots);
-  }
-
-  const reaches: ReachesEdge[] = [];
-
-  for (const [appSlug, roots] of rootsByApp) {
-    const depthOf = new Map<string, number>();
-    // A plain array used as a FIFO queue with a moving read cursor: a direct
-    // dependency is depth 1, and because BFS dequeues in non-decreasing depth
-    // order the first time a version is seen is its shortest distance.
-    const queue: string[] = [];
-    for (const root of roots) {
-      if (!depthOf.has(root)) {
-        depthOf.set(root, 1);
-        queue.push(root);
-      }
-    }
-
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
-      const current = queue[cursor];
-      const depth = depthOf.get(current)!;
-      for (const next of adjacency.get(current) ?? []) {
-        if (!depthOf.has(next)) {
-          depthOf.set(next, depth + 1);
-          queue.push(next);
-        }
-      }
-    }
-
-    for (const [versionId, depth] of depthOf) {
-      reaches.push({ appSlug, versionId, depth });
-    }
-  }
-
-  return reaches;
 }
 
 main().catch((error) => {
   process.stderr.write(`\nCrawl failed: ${error instanceof Error ? error.stack : error}\n\n`);
   process.exit(1);
 });
-
-export type { Manifest };

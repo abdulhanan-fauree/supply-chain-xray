@@ -1,13 +1,16 @@
-import neo4j, { Driver, Session, RecordShape } from "neo4j-driver";
+import neo4j, { type Driver, type Session } from "neo4j-driver";
+
+import { DRIVER } from "./config";
+import { Row } from "./records";
 import { readEnv, requireEnv, type Env } from "./env";
 
 /**
- * Single shared driver for the whole process.
+ * CognoDB access: one shared driver, typed reads, and a failure taxonomy.
  *
- * The Neo4j driver holds a connection pool and is designed to be created once
- * and reused; creating one per request would exhaust the free tier's 200
- * connection limit. In development Next.js re-evaluates modules on every edit,
- * so the instance is parked on globalThis to survive hot reloads.
+ * The driver owns a connection pool and is designed to be created once per
+ * process; one per request would exhaust the instance's connection limit. In
+ * development Next.js re-evaluates modules on every edit, so the instance is
+ * held on globalThis to survive hot reloads.
  */
 
 const globalForDb = globalThis as unknown as { __cognodbDriver?: Driver };
@@ -15,17 +18,18 @@ const globalForDb = globalThis as unknown as { __cognodbDriver?: Driver };
 export type DbErrorKind =
   /** Environment variables missing or malformed. */
   | "unconfigured"
-  /** Could not reach the instance: DNS, TLS, network, or the instance is paused. */
+  /** Could not reach the instance: DNS, TLS, network, or a paused instance. */
   | "unreachable"
-  /** Reached the instance but credentials were rejected. */
+  /** Reached the instance, but the credentials were rejected. */
   | "unauthorized"
-  /** Connected fine, but the query itself failed. */
+  /** Connected, but the query itself failed. */
   | "query"
-  /** The query took longer than we are willing to wait. */
+  /** The query exceeded its time budget. */
   | "timeout";
 
 export class DbError extends Error {
   readonly kind: DbErrorKind;
+  /** Raw text from the database, for diagnostics rather than for users. */
   readonly detail?: string;
 
   constructor(kind: DbErrorKind, message: string, detail?: string) {
@@ -36,7 +40,13 @@ export class DbError extends Error {
   }
 }
 
-/** Human-readable copy for each failure mode, surfaced directly in the UI. */
+/**
+ * User-facing copy per failure mode.
+ *
+ * Written alongside the taxonomy rather than at the call site, so every surface
+ * that hits a given failure explains it the same way — and so the explanation is
+ * about what to do next rather than what the protocol reported.
+ */
 export const DB_ERROR_COPY: Record<DbErrorKind, { title: string; hint: string }> = {
   unconfigured: {
     title: "Database not configured",
@@ -60,6 +70,9 @@ export const DB_ERROR_COPY: Record<DbErrorKind, { title: string; hint: string }>
   },
 };
 
+const UNREACHABLE_PATTERN = /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|certificate|ServiceUnavailable/i;
+const TIMEOUT_PATTERN = /context deadline exceeded|transaction has been terminated|timed out/i;
+
 function classify(error: unknown): DbError {
   if (error instanceof DbError) return error;
 
@@ -70,14 +83,11 @@ function classify(error: unknown): DbError {
   if (code.includes("Unauthorized") || code.includes("AuthenticationRateLimit")) {
     return new DbError("unauthorized", DB_ERROR_COPY.unauthorized.title, message);
   }
-  if (
-    raw?.name === "Neo4jError" &&
-    (code === "ServiceUnavailable" || code === "SessionExpired")
-  ) {
-    return new DbError("unreachable", DB_ERROR_COPY.unreachable.title, message);
+  if (TIMEOUT_PATTERN.test(message)) {
+    return new DbError("timeout", DB_ERROR_COPY.timeout.title, message);
   }
-  // DNS/TLS/socket failures arrive as plain Node errors before Bolt handshakes.
-  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|certificate|ServiceUnavailable/i.test(message)) {
+  if (code === "ServiceUnavailable" || code === "SessionExpired" || UNREACHABLE_PATTERN.test(message)) {
+    // Socket, DNS and TLS failures arrive as plain Node errors, before Bolt.
     return new DbError("unreachable", DB_ERROR_COPY.unreachable.title, message);
   }
   return new DbError("query", DB_ERROR_COPY.query.title, message);
@@ -88,21 +98,13 @@ function createDriver(env: Env): Driver {
     env.COGNODB_URI,
     neo4j.auth.basic(env.COGNODB_USER, env.COGNODB_PASSWORD),
     {
-      // Counts and depths come back as plain JS numbers instead of Integer
-      // objects. Safe here: nothing in this data model approaches 2^53.
+      // Counts and depths arrive as plain JS numbers rather than Integer
+      // objects. See Row.number in records.ts.
       disableLosslessIntegers: true,
-      // The free c0 instance allows 200 connections; a web app needs very few,
-      // and keeping the pool small avoids starving the seed script.
-      maxConnectionPoolSize: 12,
-      // Tuned for how long a person will stare at a loading skeleton before
-      // concluding the page is broken. Measured against an unreachable host:
-      // the defaults took ~10s to surface the error card, these bring it to
-      // ~4.8s. Still generous next to the ~250ms a healthy query needs, but
-      // two connection attempts have to fail before we can honestly say the
-      // instance is unreachable rather than briefly slow.
-      connectionAcquisitionTimeout: 6_000,
-      connectionTimeout: 4_000,
-      maxTransactionRetryTime: 4_000,
+      maxConnectionPoolSize: DRIVER.maxConnectionPoolSize,
+      connectionAcquisitionTimeout: DRIVER.connectionAcquisitionTimeout,
+      connectionTimeout: DRIVER.connectionTimeout,
+      maxTransactionRetryTime: DRIVER.maxTransactionRetryTime,
     },
   );
 }
@@ -119,28 +121,26 @@ export function getDriver(): Driver {
     );
   }
 
-  const driver = createDriver(result.env);
-  globalForDb.__cognodbDriver = driver;
-  return driver;
+  globalForDb.__cognodbDriver = createDriver(result.env);
+  return globalForDb.__cognodbDriver;
 }
 
-/** For scripts: a driver that fails loudly and is closed by the caller. */
+/** A driver for scripts: fails loudly on bad config, closed by the caller. */
 export function createStandaloneDriver(): Driver {
   return createDriver(requireEnv());
 }
 
 async function withSession<T>(
   mode: "READ" | "WRITE",
-  fn: (session: Session) => Promise<T>,
+  work: (session: Session) => Promise<T>,
 ): Promise<T> {
-  const driver = getDriver();
   const { COGNODB_DATABASE } = requireEnv();
-  const session = driver.session({
+  const session = getDriver().session({
     database: COGNODB_DATABASE,
     defaultAccessMode: mode === "READ" ? neo4j.session.READ : neo4j.session.WRITE,
   });
   try {
-    return await fn(session);
+    return await work(session);
   } catch (error) {
     throw classify(error);
   } finally {
@@ -151,32 +151,30 @@ async function withSession<T>(
 /**
  * Run a read query and map each record to a typed row.
  *
- * `cypher` is always a static string and every value travels in `params` — the
+ * `cypher` is always a static string and every value travels in `params`. The
  * driver sends parameters separately from the query text, so there is no string
  * concatenation and no injection surface anywhere in this codebase.
  */
-export async function read<Row>(
+export async function read<T>(
   cypher: string,
   params: Record<string, unknown>,
-  map: (record: RecordShape) => Row,
+  map: (row: Row) => T,
   options: { timeoutMs?: number } = {},
-): Promise<Row[]> {
+): Promise<T[]> {
   return withSession("READ", async (session) => {
     const result = await session.executeRead((tx) => tx.run(cypher, params), {
-      // Server-side ceiling: a runaway traversal is cancelled by the database
-      // rather than holding a connection open until the request times out.
-      timeout: options.timeoutMs ?? 20_000,
+      timeout: options.timeoutMs ?? DRIVER.queryTimeout,
     });
-    return result.records.map((record) => map(record.toObject()));
+    return result.records.map((record) => map(new Row(record.toObject())));
   });
 }
 
-/** Convenience for queries that return exactly one row (or none). */
-export async function readOne<Row>(
+/** For queries that return at most one row. */
+export async function readOne<T>(
   cypher: string,
   params: Record<string, unknown>,
-  map: (record: RecordShape) => Row,
-): Promise<Row | null> {
+  map: (row: Row) => T,
+): Promise<T | null> {
   const rows = await read(cypher, params, map);
   return rows[0] ?? null;
 }
@@ -191,18 +189,18 @@ export async function write(
 }
 
 export type Health =
-  | { ok: true; address: string; version: string }
+  | { ok: true; address: string; protocol: string }
   | { ok: false; kind: DbErrorKind; title: string; hint: string; detail?: string };
 
-/** Used by the health endpoint and by pages that need to degrade gracefully. */
 export async function checkHealth(): Promise<Health> {
   try {
-    const driver = getDriver();
-    const info = await driver.getServerInfo({ database: requireEnv().COGNODB_DATABASE });
+    const info = await getDriver().getServerInfo({
+      database: requireEnv().COGNODB_DATABASE,
+    });
     return {
       ok: true,
       address: info.address ?? "unknown",
-      version: info.protocolVersion ? `Bolt ${info.protocolVersion}` : "unknown",
+      protocol: info.protocolVersion ? `Bolt ${info.protocolVersion}` : "unknown",
     };
   } catch (error) {
     const dbError = classify(error);
@@ -222,3 +220,5 @@ export async function closeDriver(): Promise<void> {
     globalForDb.__cognodbDriver = undefined;
   }
 }
+
+export type { Row };

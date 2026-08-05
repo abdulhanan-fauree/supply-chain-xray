@@ -22,17 +22,17 @@ Then an advisory lands for a package you have never heard of, and the only quest
 
 Every one of these is a question about *connections*, and the answer to most of them is a **path** — an ordered chain of packages — not a number and not a row.
 
-This app answers them. The headline finding from the seeded data:
+This application answers them. The clearest finding in the seeded data:
 
 > `legacy-admin` → `handlebars@4.1.0` → `optimist@0.6.1` → `minimist@0.0.10`
 
-Nobody chose `minimist 0.0.10`. Handlebars did, via optimist, three hops down, and it carries a prototype-pollution advisory. That chain is the entire product in one line.
+Nobody chose `minimist 0.0.10`. Handlebars did, via optimist, three hops down, and it carries a prototype-pollution advisory. That chain is the product in one line.
 
 ---
 
 ## Why a graph database?
 
-The requirement was to pick a problem where a graph genuinely earns its place. Here is the specific case, built from what actually happened while writing this.
+The brief asked for a problem where a graph genuinely earns its place. Five specific reasons it does here, and one where it does not.
 
 ### 1. The answer is a path, and a relational result set has no path type
 
@@ -52,7 +52,7 @@ In SQL you write a recursive CTE that emits one row per hop, carry an array colu
 
 ### 3. Depth is a property of the traversal, not of the data
 
-`minimist@0.0.10` is not "at depth 3" — it is at depth 3 *from `legacy-admin`*, and at no depth at all from the other five apps. There is no column this belongs in. Every depth number in this app is a property of a walk from a particular starting point.
+`minimist@0.0.10` is not "at depth 3" — it is at depth 3 *from `legacy-admin`*, and at no depth at all from the other five applications. There is no column this belongs in. Every depth figure in the application is a property of a walk from a particular starting point.
 
 ### 4. Set intersection over several transitive closures
 
@@ -65,11 +65,11 @@ RETURN pkg.name, count(DISTINCT app) AS appsReached, min(reach.depth) AS minDept
 
 The answer: `hasown` reaches **5 of the 6 applications at depth 3**, and **148 of the shared packages were declared by nobody**.
 
-### 5. Where relational would be fine — stated honestly
+### 5. Where relational would be fine
 
 Not everything here needs a graph. `Package → Version` is a plain one-to-many. Maintainer lists are a join table. Counting packages is `SELECT COUNT(*)`. A graph is the right choice because the *interesting* half of this application is traversal-shaped, not because every query is.
 
-And one honest caveat: the nesting-depth aggregate is **materialised** at load time as `(:App)-[:REACHES {depth}]->(:Version)` rather than traversed live — see [Performance](#performance-what-measurement-changed). That is a transitive closure cached for hot reads, a normal graph technique, but it is worth naming rather than implying every number is computed on demand. The queries that return *paths* are all live, because there is nothing to precompute about a path.
+One caveat worth naming rather than glossing over: the nesting-depth aggregate is **materialised** at load time as `(:App)-[:REACHES {depth}]->(:Version)` rather than traversed live — see [Performance](#performance). That is a transitive closure cached for hot reads, a standard graph technique, but it means not every figure on screen is computed on demand. The queries that return *paths* all are, because there is nothing about a path to precompute.
 
 ---
 
@@ -112,7 +112,7 @@ graph LR
 
 **`Version` is its own node, not a property of `Package`.** This is the load-bearing decision. Advisories affect version *ranges*, not packages — `GHSA-p6mc` affects lodash `>=3.7.0 <4.17.19`. Hanging `AFFECTS` off `Package` would report every lodash user as vulnerable including those already on 4.17.21, making every answer a false positive.
 
-**`DEPENDS_ON` has no `dev` flag; `USES` does.** npm does not install the devDependencies of your dependencies — only of the root project. So a dev edge below depth 0 does not exist in any real install tree, and it is not in this graph. The flag lives on `USES`, where the distinction is real. A field that is always `false` is a lie waiting to be believed.
+**`DEPENDS_ON` has no `dev` flag; `USES` does.** npm does not install the devDependencies of your dependencies — only of the root project. So a dev edge below the root does not exist in any real install tree, and it is not in this graph either. The flag lives on `USES`, where the distinction is real — a field that is always `false` invites being trusted.
 
 **peerDependencies are not followed.** A peer is satisfied by a version already elsewhere in the tree; adding an edge for it would double-count.
 
@@ -120,14 +120,14 @@ graph LR
 
 **Maintainers come from each package's *current* metadata,** not the historical maintainer list on whichever old version happens to be installed. The trust question is "who holds the keys today", not "who held them in 2019".
 
-**Licenses come from each resolved version's own document.** A package's license can change between releases, and `legacy-admin` pins releases from 2019 — the app the license query is most interesting about.
+**Licences come from each resolved version's own document.** A package's licence can change between releases, and the applications pinning old releases are exactly the ones the licence query is about.
 
 ---
 
 ## Screenshots
 
 ### Portfolio overview
-Every application, its full install tree, and what reaches it.
+Every application, its full install tree, and every advisory that reaches it.
 
 ![Overview](docs/screenshots/01-overview.png)
 
@@ -137,12 +137,12 @@ Every application, its full install tree, and what reaches it.
 ![Blast radius](docs/screenshots/02-blast-radius-chain.png)
 
 ### Fix points
-16 direct dependencies carry all 105 findings — the 3 biggest account for 62 of them (59%). Triage, not a wall of CVEs.
+16 direct dependencies carry all 105 findings, and the three biggest account for 62 of them. Triage rather than a wall of CVEs.
 
 ![Fix points](docs/screenshots/03-app-fix-points.png)
 
 ### A clean application
-4 of 6 apps have no advisories at all. The empty state is designed, not an afterthought.
+Four of the six applications have no advisories at all, so the clean state is designed rather than incidental.
 
 ![Clean app](docs/screenshots/04-app-clean.png)
 
@@ -165,7 +165,7 @@ The top 5 npm accounts can publish to **40%** of the installed packages — 403 
 ### Every query, documented in the app
 ![Queries](docs/screenshots/10-queries.png)
 
-Screenshots are regenerated with `./scripts/screenshots.sh`, so they cannot go stale after a UI change.
+Regenerate with `./scripts/screenshots.sh` after a UI change, so they cannot go stale.
 
 ---
 
@@ -227,7 +227,7 @@ npm run crawl -- --max-packages 2000 --max-depth 8
 npm run dev      # http://localhost:3100
 ```
 
-Port 3100, not 3000, to stay out of the way of whatever else is running locally.
+Port 3100 rather than 3000, to avoid colliding with whatever else is running locally.
 
 ### Other commands
 
@@ -237,7 +237,7 @@ Port 3100, not 3000, to stay out of the way of whatever else is running locally.
 | `npm run crawl` | Rebuild `data/graph.json` from npm + OSV |
 | `npm run seed` / `reseed` | Load / wipe-and-load the graph |
 | `npm run bench` | Time every query against the live instance |
-| `npm run check:licenses` | 18-case truth table for the SPDX categoriser |
+| `npm test` | Unit tests (59 cases, `node:test`) |
 | `npm run typecheck`, `npm run lint` | Static checks |
 | `./scripts/screenshots.sh` | Regenerate README screenshots |
 
@@ -266,7 +266,7 @@ CALL {
 RETURN dep.id AS versionId, depth, chain, entryRange
 ```
 
-An 8-hop traversal returning the path itself. The outer match narrows to vulnerable versions *before* any path finding starts — that scoping is what makes it affordable (see [Performance](#performance-what-measurement-changed)).
+An 8-hop traversal returning the path itself. The outer match narrows to vulnerable versions *before* any path finding starts — that scoping is what makes it affordable (see [Performance](#performance)).
 
 ### Trust concentration — if one account were compromised today
 
@@ -295,7 +295,7 @@ Verified live: `express` reaches `ms` in two hops, via `debug@2.6.9`.
 
 ### License obligations
 
-Filters on a category computed at load time from the SPDX expression, then finds the chain responsible. The categoriser **decomposes** expressions rather than pattern-matching them — `(BSD-3-Clause OR GPL-2.0)` is a *choice*, so the permissive reading is correct, while `AND` binds every operand at once. Verified against an 18-case truth table (`npm run check:licenses`).
+Filters on a category computed at load time from the SPDX expression, then finds the chain responsible. The categoriser **decomposes** expressions rather than pattern-matching them: `(BSD-3-Clause OR GPL-2.0)` is a *choice*, so the least restrictive operand governs, while `AND` binds every operand at once. Both cases are covered by tests.
 
 Real finding: `storefront-web` carries 14 weak-copyleft dependencies, all of sharp's LGPL libvips binaries, pulled in through Next.js at depth 3.
 
@@ -317,37 +317,66 @@ src/
     db-error.tsx           Failure-mode UI + withDbFallback
     primitives.tsx         Severity badges, stat tiles, skeletons
   lib/
+    config.ts              Traversal depth, batch and page sizes, timeouts
     env.ts                 zod-validated config, result type not throw
-    db.ts                  Driver singleton, DbError taxonomy, read/write
-    model.ts               Node labels, relationship types, row types
+    db.ts                  Driver singleton, DbError taxonomy, typed reads
+    records.ts             Checked reads over a Bolt record
+    model.ts               Labels, relationship types, row types
+    severity.ts            Severity ranking and aggregation
+    version-id.ts          name@version parsing and comparison
     queries/               One module per view; all Cypher lives here
 scripts/
   probe.ts                 Capability verification
   crawl.ts                 Dataset builder (no database)
   seed.ts                  Loader (no network)
   bench.ts                 Query timing
-  checks/licenses.ts       SPDX truth table
   screenshots.sh           README image regeneration
+  lib/
+    crawler.ts             Breadth-first manifest walk
+    reachability.ts        BFS that materialises REACHES
+    dataset.ts             Deterministic ordering and summary
+    registry.ts            npm registry client, SPDX categoriser
+    osv.ts                 OSV client, alias clustering, range matching
+    http.ts                Cached, retrying, concurrency-limited fetch
+tests/                     59 unit tests (node:test)
 data/graph.json            The committed, reproducible dataset (1.6 MB)
 ```
 
 **Crawl and load are separate steps.** A registry outage cannot leave the graph half-written, and a reviewer with no network can still seed from the committed artifact.
 
-**The dataset is deterministic** — same manifests in, same bytes out, verified across three consecutive runs. Getting there required two fixes: the package cap was being checked inside concurrent workers (so which packages made the cut depended on interleaving, and two runs differed by 2 packages and 18 advisories), and the OSV batch cache was keyed by list *position* rather than content, so a one-entry shift silently re-queried upstream and could pick up a different answer.
+**The dataset is deterministic** — the same manifests produce the same bytes, verified across consecutive runs. Two things are load-bearing for that. The package budget is checked between traversal levels rather than inside concurrent workers, because workers observing different counts depending on interleaving made the graph vary run to run. And the OSV batch cache is keyed by request *contents* rather than list position, so a one-entry shift in the package list cannot silently re-query upstream and pick up a different answer.
 
 **The driver never reaches the browser.** Every query runs in a server component.
 
+### Shared modules
+
+The pieces several layers agree on are factored out rather than reimplemented per call site:
+
+| Module | Responsibility |
+|---|---|
+| `lib/config.ts` | Traversal depth, batch and page sizes, driver timeouts |
+| `lib/records.ts` | Typed reads over a Bolt record — no casts in the query layer |
+| `lib/severity.ts` | Severity ranking, aggregation and display order |
+| `lib/version-id.ts` | Parsing and comparing `name@version` identifiers |
+| `lib/queries/fragments.ts` | Cypher shared by three queries, defined once |
+
+`records.ts` earns its place: mapping an untyped Bolt record otherwise means a cast per field, and a cast silences the compiler without checking anything — rename a column and `record.slug as string` yields `undefined` typed as `string`, failing somewhere unrelated. The readers check and throw naming the column, which turns a schema mismatch into an immediate, locatable error.
+
+`fragments.ts` holds the "shortest chain from a declared dependency" subquery that three queries need. Duplicated, a change to the dev-dependency filter or the depth bound had to be applied in three places and would diverge in whichever was missed.
+
 ### Pagination
 
-The long lists — advisories, choke points, trust accounts, single-maintainer packages, dependents — paginate through **search params rather than client state**. That buys three things worth more than the interactivity: a page of results is a link you can send someone, the back button behaves, and the list is readable with no JavaScript. Out-of-range input is clamped rather than rejected, so `?page=0`, `?page=999` and `?page=banana` all resolve to a real page instead of an error or a blank screen. Page 1 is the canonical URL with no param at all, and the trust page paginates two independent lists via separate params (`?trust=2&sole=3`).
+The long lists — advisories, choke points, trust accounts, single-maintainer packages, dependents — paginate through **search params rather than client state**. That buys three things worth more than the interactivity: a page of results is a shareable link, the back button behaves, and the list reads with no JavaScript. Out-of-range input is clamped rather than rejected, so `?page=0`, `?page=999` and `?page=banana` all resolve to a real page instead of an error or a blank screen. Page 1 is the canonical URL with no param, and the trust page paginates two independent lists through separate params (`?trust=2&sole=3`).
 
-The trade-off: reading search params makes those routes dynamic, so they lose static prerendering. Worth it — `/packages` was a single 613 KB page, and is now 136 KB.
+The trade-off is that reading search params makes those routes dynamic, so they lose static prerendering. Worth it: `/packages` was a single 613 KB page and is now 136 KB.
 
 ### Error handling
 
 `DbError` carries a five-way taxonomy — `unconfigured`, `unreachable`, `unauthorized`, `query`, `timeout` — each with user-facing copy written up front. Every page renders through `withDbFallback`, so a page either gets its data or gets an explanation; never a stack trace, a 500, or a half-rendered shell.
 
-Verified by pointing the app at a non-existent host: it returns **HTTP 200** with a card reading *"The CognoDB instance may be paused, still provisioning, or blocked by the network"* and the raw database message demoted into a collapsed `<details>`. Driver timeouts were tightened after measuring that path — the defaults took ~10s to surface the card, now ~4.8s.
+Verified by pointing the application at a non-existent host: it returns **HTTP 200** with a card reading *"The CognoDB instance may be paused, still provisioning, or blocked by the network"*, and the raw database message demoted into a collapsed `<details>`. Driver timeouts are set against that path rather than against protocol defaults, which took roughly 10s to surface the card; it now takes about 5s.
+
+Detail pages distinguish three outcomes rather than two. A record that does not exist is a 404; a database that cannot answer renders the error state. Collapsing the second into the first would tell someone their advisory does not exist when the instance is merely paused.
 
 ---
 
@@ -375,7 +404,7 @@ Also worth knowing: the instance reports itself as `Neo4j/5.26.0` over Bolt 5.4,
 
 ---
 
-## Performance: what measurement changed
+## Performance
 
 The free c0 instance is burstable **0.5 vCPU / 256 MB RAM**. `npm run bench` times every query against it, warming the connection pool first and judging on the median — an outlier there is CPU credit exhaustion, not a property of the query.
 
@@ -389,15 +418,15 @@ The free c0 instance is burstable **0.5 vCPU / 256 MB RAM**. `npm run bench` tim
 | License obligations | 652ms |
 | Trust concentration | 1606ms |
 
-Three things measurement contradicted:
+Three findings shaped the query layer, none of which were obvious before measuring on the real instance.
 
-**1. My own comment was backwards.** I had written that `max(length(p))` would be too expensive and `shortestPath` would be the cheap way to measure depth. On this engine it is the reverse: `max(length(p))` over a bounded variable-length match runs in 519ms for all six apps, while `shortestPath` called once per (source, target) pair **times out at 20s** because it solves ~730 independent searches. Intuition carried from other databases was wrong in this specific case.
+**`max(length(p))` is cheap here; per-pair `shortestPath` is not.** Path length over a bounded variable-length match runs in ~520ms for all six applications. A `shortestPath` evaluated once per (source, target) pair exceeds the 20s query timeout, because it solves several hundred independent searches. The two look interchangeable and are not, which is why nesting depth is materialised and longest chain is live.
 
-**2. Nesting depth and longest chain are different numbers.** `orders-api` nests 5 levels deep but contains a 9-package chain — the longest route to a node is not the shortest one. Four of six apps differ. Both are now computed and labelled for what they are, rather than one shipped under the other's name.
+**Nesting depth and longest chain are different measures.** `orders-api` nests 5 levels deep but contains a 9-package chain: the longest route to a node is not the shortest one, and four of the six applications differ. Both are computed and each is labelled for what it is.
 
-**3. The same mistake twice: asking a narrow question once per row.** Blast radius was 2602ms because it found a path per *advisory* (105) when the findings land on 29 distinct versions — the same path computed four times over. Trust concentration was 3980ms because it ran an advisory subquery per *maintainer* (558) when only a handful maintain anything with an advisory. Both were split into concurrent queries joined on a small map: **1288ms** and **1606ms**.
+**Asking a narrow question once per row dominates cost.** Two queries had this shape. Blast radius searched for a path per *advisory* when findings land on far fewer distinct versions, so the same path was found repeatedly. Trust concentration ran an advisory subquery per *maintainer* when only a small minority maintain anything with an advisory against it. Splitting each into two concurrent queries joined on a small map took them from 2.6s to 1.3s and from 3.9s to 1.6s.
 
-In production every page prerenders and serves in **5–8ms**; `revalidate = 60` means the traversals run once a minute rather than once a visitor.
+In production every page prerenders or caches and serves in **5–8ms**; `revalidate = 60` means the traversals run once a minute rather than once per visitor.
 
 ---
 

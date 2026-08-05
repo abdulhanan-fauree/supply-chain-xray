@@ -1,14 +1,16 @@
+import { MAX_TRAVERSAL_DEPTH, CHOKE_POINT_MIN_APPS } from "../config";
 import { read, readOne } from "../db";
-import { MAX_TRAVERSAL_DEPTH, type LicenseCategory, type Severity } from "../model";
+import { worstSeverity } from "../severity";
+import type { LicenseCategory, Severity } from "../model";
 
 /**
  * Package views, including the choke-point query.
  *
- * A choke point is a package that many applications depend on without any of them
- * choosing it. Finding them means intersecting several transitive closures and
- * asking how deep each one sits — set intersection over reachability, which is
- * exactly what a graph is for and what SQL needs a recursive CTE plus a
- * self-join per application to express.
+ * A choke point is a package many applications depend on without any of them
+ * having chosen it. Finding them means intersecting several transitive closures
+ * and comparing how deep each sits — set intersection over reachability, which
+ * SQL expresses as one recursive CTE per application plus a join across their
+ * results.
  */
 
 export type ChokePointRow = {
@@ -17,11 +19,11 @@ export type ChokePointRow = {
   latestVersion: string | null;
   weeklyDownloads: number | null;
   deprecated: boolean;
-  /** How many of the six applications reach this package at all. */
+  /** Applications that reach this package at all. */
   appsReached: number;
-  /** Shallowest hop count across those apps. 1 means somebody declared it. */
+  /** Shallowest hop count across those applications. */
   minDepth: number;
-  /** True when no application declares it directly — pure collateral. */
+  /** True when no application declares it directly. */
   neverDeclared: boolean;
   versionsInstalled: number;
   maintainers: number;
@@ -52,41 +54,25 @@ RETURN pkg.name            AS name,
        count(DISTINCT app)     AS appsReached,
        min(reach.depth)        AS minDepth,
        count(DISTINCT version) AS versionsInstalled,
-       maintainers,
-       advisories,
-       severities
+       maintainers, advisories, severities
 `;
 
-const SEVERITY_RANK: Record<Severity, number> = {
-  CRITICAL: 0,
-  HIGH: 1,
-  MODERATE: 2,
-  LOW: 3,
-  UNKNOWN: 4,
-};
-
-function worstOf(severities: string[]): Severity | null {
-  const known = severities.filter((value): value is Severity => value in SEVERITY_RANK);
-  if (known.length === 0) return null;
-  return known.sort((a, b) => SEVERITY_RANK[a] - SEVERITY_RANK[b])[0];
-}
-
-export async function getChokePoints(minApps = 2): Promise<ChokePointRow[]> {
-  const rows = await read(CHOKE_POINTS, {}, (record) => {
-    const minDepth = record.minDepth as number;
+export async function getChokePoints(minApps = CHOKE_POINT_MIN_APPS): Promise<ChokePointRow[]> {
+  const rows = await read(CHOKE_POINTS, {}, (row) => {
+    const minDepth = row.count("minDepth");
     return {
-      name: record.name as string,
-      description: (record.description as string | null) ?? null,
-      latestVersion: (record.latestVersion as string | null) ?? null,
-      weeklyDownloads: (record.weeklyDownloads as number | null) ?? null,
-      deprecated: Boolean(record.deprecated),
-      appsReached: record.appsReached as number,
+      name: row.string("name"),
+      description: row.stringOrNull("description"),
+      latestVersion: row.stringOrNull("latestVersion"),
+      weeklyDownloads: row.numberOrNull("weeklyDownloads"),
+      deprecated: row.boolean("deprecated"),
+      appsReached: row.count("appsReached"),
       minDepth,
       neverDeclared: minDepth > 1,
-      versionsInstalled: record.versionsInstalled as number,
-      maintainers: record.maintainers as number,
-      advisories: record.advisories as number,
-      worstSeverity: worstOf((record.severities ?? []) as string[]),
+      versionsInstalled: row.count("versionsInstalled"),
+      maintainers: row.count("maintainers"),
+      advisories: row.count("advisories"),
+      worstSeverity: worstSeverity(row.list("severities")),
     };
   });
 
@@ -130,15 +116,15 @@ RETURN pkg.name            AS name,
 `;
 
 export async function getPackage(name: string): Promise<PackageDetail | null> {
-  return readOne(PACKAGE_DETAIL, { name }, (record) => ({
-    name: record.name as string,
-    description: (record.description as string | null) ?? null,
-    latestVersion: (record.latestVersion as string | null) ?? null,
-    weeklyDownloads: (record.weeklyDownloads as number | null) ?? null,
-    deprecated: Boolean(record.deprecated),
-    repoUrl: (record.repoUrl as string | null) ?? null,
-    homepage: (record.homepage as string | null) ?? null,
-    maintainers: ((record.maintainers ?? []) as string[]).sort(),
+  return readOne(PACKAGE_DETAIL, { name }, (row) => ({
+    name: row.string("name"),
+    description: row.stringOrNull("description"),
+    latestVersion: row.stringOrNull("latestVersion"),
+    weeklyDownloads: row.numberOrNull("weeklyDownloads"),
+    deprecated: row.boolean("deprecated"),
+    repoUrl: row.stringOrNull("repoUrl"),
+    homepage: row.stringOrNull("homepage"),
+    maintainers: row.strings("maintainers").sort(),
   }));
 }
 
@@ -152,7 +138,7 @@ export type InstalledVersion = {
   licenseCategory: LicenseCategory | null;
   advisories: number;
   worstSeverity: Severity | null;
-  /** Apps whose production tree contains this exact version. */
+  /** Applications whose production tree contains this exact version. */
   apps: Array<{ slug: string; depth: number }>;
 };
 
@@ -184,21 +170,21 @@ RETURN version.id             AS versionId,
 `;
 
 export async function getPackageVersions(name: string): Promise<InstalledVersion[]> {
-  const rows = await read(PACKAGE_VERSIONS, { name }, (record) => ({
-    versionId: record.versionId as string,
-    version: record.version as string,
-    releasesBehind: (record.releasesBehind as number | null) ?? null,
-    isLatest: Boolean(record.isLatest),
-    deprecated: Boolean(record.deprecated),
-    spdxId: (record.spdxId as string | null) ?? null,
-    licenseCategory: (record.licenseCategory as LicenseCategory | null) ?? null,
-    advisories: record.advisories as number,
-    worstSeverity: worstOf(((record.severities ?? []) as Array<string | null>).filter(
-      (value): value is string => Boolean(value),
-    )),
-    apps: (((record.apps ?? []) as Array<[string, number] | null>)
-      .filter((entry): entry is [string, number] => Array.isArray(entry) && entry[0] !== null)
-      .map(([slug, depth]) => ({ slug, depth }))),
+  const rows = await read(PACKAGE_VERSIONS, { name }, (row) => ({
+    versionId: row.string("versionId"),
+    version: row.string("version"),
+    releasesBehind: row.numberOrNull("releasesBehind"),
+    isLatest: row.boolean("isLatest"),
+    deprecated: row.boolean("deprecated"),
+    spdxId: row.stringOrNull("spdxId"),
+    licenseCategory: row.stringOrNull("licenseCategory") as LicenseCategory | null,
+    advisories: row.count("advisories"),
+    worstSeverity: worstSeverity(row.list("severities")),
+    // An OPTIONAL MATCH that found nothing collects [null, null].
+    apps: row
+      .pairs("apps")
+      .filter(([slug]) => typeof slug === "string")
+      .map(([slug, depth]) => ({ slug: slug as string, depth: Number(depth) || 0 })),
   }));
 
   return rows.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
@@ -209,13 +195,16 @@ export type Dependent = {
   packageName: string;
   range: string;
   optional: boolean;
-  /** Which version of the subject package this dependent pulls in. */
+  /** Which version of the subject package this dependent resolves to. */
   resolvesTo: string;
 };
 
 /**
- * Who depends on this package. A reverse edge walk, one hop — trivial here and
- * the kind of thing that needs a dedicated index in a relational schema.
+ * What depends on this package: a one-hop walk against the edge direction.
+ *
+ * Cheap because a relationship has no preferred direction — the same edges answer
+ * "what does X depend on" and "what depends on X". A relational schema needs a
+ * second index to make the reverse question anything but a scan.
  */
 const DEPENDENTS = `
 MATCH (:Package {name: $name})-[:HAS_VERSION]->(target:Version)
@@ -229,22 +218,21 @@ ORDER BY dependent.packageName, dependent.version
 `;
 
 export async function getDependents(name: string): Promise<Dependent[]> {
-  return read(DEPENDENTS, { name }, (record) => ({
-    versionId: record.versionId as string,
-    packageName: record.packageName as string,
-    range: record.range as string,
-    optional: Boolean(record.optional),
-    resolvesTo: record.resolvesTo as string,
+  return read(DEPENDENTS, { name }, (row) => ({
+    versionId: row.string("versionId"),
+    packageName: row.string("packageName"),
+    range: row.string("range"),
+    optional: row.boolean("optional"),
+    resolvesTo: row.string("resolvesTo"),
   }));
 }
 
 /**
- * Shortest path between two arbitrary packages: the six-degrees query.
+ * Shortest path between two arbitrary packages.
  *
- * Included because it is the single clearest demonstration of the difference.
- * "How is my app related to this package I have never heard of" is one line of
- * Cypher and an unbounded self-join in SQL, and the answer is a path, which a
- * relational result set cannot represent without reassembly in application code.
+ * The clearest single demonstration of the difference: one line of Cypher against
+ * an unbounded self-join, and the answer is a path rather than a set of rows to
+ * stitch back together.
  */
 const PACKAGE_PATH = `
 MATCH (from:Package {name: $from})-[:HAS_VERSION]->(start:Version)
@@ -259,9 +247,9 @@ export async function getPackagePath(
   from: string,
   to: string,
 ): Promise<{ chain: string[]; hops: number } | null> {
-  return readOne(PACKAGE_PATH, { from, to }, (record) => ({
-    chain: (record.chain ?? []) as string[],
-    hops: record.hops as number,
+  return readOne(PACKAGE_PATH, { from, to }, (row) => ({
+    chain: row.strings("chain"),
+    hops: row.count("hops"),
   }));
 }
 
@@ -272,7 +260,7 @@ ORDER BY name
 `;
 
 export async function getPackageNames(): Promise<string[]> {
-  return read(PACKAGE_NAMES, {}, (record) => record.name as string);
+  return read(PACKAGE_NAMES, {}, (row) => row.string("name"));
 }
 
 export const PACKAGE_CYPHER = { CHOKE_POINTS, DEPENDENTS, PACKAGE_PATH };

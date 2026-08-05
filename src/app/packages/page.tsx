@@ -12,20 +12,18 @@ import {
   formatCount,
 } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
+import { CHOKE_POINT_MIN_APPS, PAGE_SIZE } from "@/lib/config";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * Choke points: packages that several applications depend on without any of them
- * having chosen it.
- *
- * The query is a set intersection over transitive closures — which packages appear
- * in N different reachability sets, and how deep in each. That is the shape SQL
- * handles worst: a recursive CTE per application, then a join across their
- * results. The interesting rows are the ones where minimum depth is greater than
- * one, because nobody reviewed those and nobody would notice them changing.
+ * Choke points: packages several applications depend on without any of them having
+ * chosen it. The rows that matter are those with a minimum depth above one —
+ * nobody reviewed them, and nobody would notice them changing.
  */
-const PAGE_SIZE = 30;
 
 export default async function PackagesPage({ searchParams }: PageProps<"/packages">) {
   const params = await searchParams;
@@ -34,9 +32,9 @@ export default async function PackagesPage({ searchParams }: PageProps<"/package
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Shared choke points</h1>
         <p className="mt-1.5 max-w-2xl text-sm text-ink-muted">
-          Packages installed by two or more applications. The ones nobody declared are the ones
-          worth knowing about: if any of them broke, several things would break at once, and no
-          pull request would have mentioned it.
+          Packages installed by two or more applications. The undeclared ones are the ones worth
+          knowing about: if any broke, several things would break at once, and no pull request
+          would have mentioned it.
         </p>
       </div>
 
@@ -50,7 +48,7 @@ export default async function PackagesPage({ searchParams }: PageProps<"/package
 async function List({ params }: { params: Record<string, string | string[] | undefined> }) {
   return withDbFallback(
     "choke points",
-    () => getChokePoints(2),
+    () => getChokePoints(CHOKE_POINT_MIN_APPS),
     (rows) => {
       if (rows.length === 0) {
         return (
@@ -65,7 +63,7 @@ async function List({ params }: { params: Record<string, string | string[] | und
       const undeclared = rows.filter((row) => row.neverDeclared);
       const allSix = rows.filter((row) => row.appsReached >= 6);
       const vulnerable = rows.filter((row) => row.advisories > 0);
-      const page = paginate(rows, params.page as string | undefined, PAGE_SIZE);
+      const page = paginate(rows, params.page as string | undefined, PAGE_SIZE.chokePoints);
 
       return (
         <div className="space-y-6">

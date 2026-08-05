@@ -1,16 +1,15 @@
 /**
  * Cached, rate-limited, retrying JSON fetch.
  *
- * Every upstream response is written to data/cache/ keyed by URL. That serves
- * two purposes:
- *   1. The crawl is resumable and cheap to re-run — a crash or a tweak to the
- *      traversal re-reads from disk instead of re-fetching ~2,700 documents.
- *   2. It keeps us honest neighbours to registry.npmjs.org and api.osv.dev,
- *      neither of which we are paying for.
+ * Every upstream response is written to data/cache/ keyed by URL, for two
+ * reasons: the crawl becomes resumable and cheap to re-run, re-reading from disk
+ * rather than re-fetching several thousand documents after a crash or a change to
+ * the traversal; and it keeps request volume against registry.npmjs.org and
+ * api.osv.dev low, neither being a paid service.
  *
- * The cache is gitignored — it runs to ~190 MB. The committed artifact is
- * data/graph.json, which is what `npm run seed` reads, so reproducing the
- * database needs no network access even though rebuilding the dataset does.
+ * The cache is gitignored, running to roughly 190 MB. The committed artifact is
+ * data/graph.json, which is what the loader reads, so reproducing the database
+ * needs no network access even though rebuilding the dataset does.
  */
 
 import { createHash } from "node:crypto";
@@ -140,7 +139,7 @@ export async function fetchJson<T>(request: JsonRequest): Promise<T | null> {
  * explicit: a rejected task rejects the whole batch.
  */
 export async function mapLimit<In, Out>(
-  items: In[],
+  items: readonly In[],
   limit: number,
   worker: (item: In, index: number) => Promise<Out>,
 ): Promise<Out[]> {

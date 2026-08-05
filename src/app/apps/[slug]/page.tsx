@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
 import {
@@ -14,35 +13,40 @@ import {
   type AffectedVersionGroup,
   type FixPoint,
 } from "@/lib/queries/app-detail";
-import { DbError } from "@/lib/db";
-import { withDbFallback } from "@/components/db-error";
+import { loadOrNotFound, withDbFallback } from "@/components/db-error";
 import { ChainLegend, DependencyChain } from "@/components/dependency-chain";
 import {
   CleanBadge,
+  CleanState,
+  SeverityBadge,
   EmptyState,
   Panel,
-  SeverityBadge,
+  PanelSkeleton,
+  SeverityBadges,
   Skeleton,
   StatTile,
 } from "@/components/primitives";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * Application detail: one app's install tree, and every advisory inside it.
+ * Application detail: one install tree, and every advisory inside it.
  *
- * The page is ordered by what a person can act on, not by what is easiest to
- * query. Fix points come first — "bump these four dependencies" — because a list
- * of 105 advisories is paralysing while a list of four upgrades is a morning's
- * work. The full blast radius is below it for anyone who wants the detail.
+ * Ordered by what is actionable rather than by what is cheapest to query. Fix
+ * points lead, because a list of a hundred advisories is paralysing while a list
+ * of four upgrades is a morning's work; the full blast radius follows for anyone
+ * who wants the detail.
  */
 
 export async function generateStaticParams() {
   try {
     return (await getAppSlugs()).map((slug) => ({ slug }));
   } catch {
-    // A build without a reachable database still succeeds; pages render on
-    // demand instead. Failing the build here would mean a database blip could
+    // A build without a reachable database still succeeds, with pages rendered
+    // on demand instead. Failing here would let a transient database problem
     // block a deploy that has nothing to do with the data.
     return [];
   }
@@ -51,20 +55,9 @@ export async function generateStaticParams() {
 export default async function AppDetailPage({ params }: PageProps<"/apps/[slug]">) {
   const { slug } = await params;
 
-  let header;
-  try {
-    header = await getAppHeader(slug);
-  } catch (error) {
-    if (error instanceof DbError) {
-      // The header is what tells us the app exists, so a database failure here
-      // cannot be distinguished from a 404 — show the error rather than claiming
-      // the application does not exist.
-      return withDbFallback("application", async () => null, () => null);
-    }
-    throw error;
-  }
-
-  if (!header) notFound();
+  const loaded = await loadOrNotFound("application", () => getAppHeader(slug));
+  if ("errorState" in loaded) return loaded.errorState;
+  const header = loaded.data;
 
   return (
     <div className="space-y-8">
@@ -93,13 +86,13 @@ export default async function AppDetailPage({ params }: PageProps<"/apps/[slug]"
         <StatTile
           label="Actually installed"
           value={header.totalDeps}
-          hint={`${header.totalDeps - header.directDeps} you never chose`}
+          hint={`${header.totalDeps - header.directDeps} arrived transitively`}
         />
         <StatTile label="Deepest nesting" value={`${header.nestingDepth}`} hint="levels down" />
         <StatTile
           label="Chose vs inherited"
           value={`${Math.round((header.directDeps / Math.max(header.totalDeps, 1)) * 100)}%`}
-          hint="share you declared"
+          hint="share declared directly"
         />
       </div>
 
@@ -108,10 +101,9 @@ export default async function AppDetailPage({ params }: PageProps<"/apps/[slug]"
       </Suspense>
 
       {/*
-        Stacked rather than side by side. In a half-width column the license
-        chains — four links deep for a sharp binary pulled in through Next.js —
-        overflowed their container and read as truncated, and the depth histogram
-        is a horizontal bar chart that wants the width anyway.
+        Stacked rather than side by side: license chains run four links deep and
+        overflow a half-width column, and the depth histogram is a horizontal bar
+        chart that benefits from the width.
       */}
       <Suspense fallback={<PanelSkeleton title="Where the tree sits" rows={7} />}>
         <DepthPanel slug={slug} total={header.totalDeps} />
@@ -131,20 +123,11 @@ async function Findings({ slug, appName }: { slug: string; appName: string }) {
       if (entries.length === 0) {
         return (
           <Panel title="Vulnerability blast radius">
-            <div className="px-5 py-12 text-center">
-              <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-clean-soft text-clean">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-5">
-                  <path d="M6 10.5l2.6 2.5L14 7.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-medium">No known advisories reach this app</p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                Every one of its {""}
-                installed versions is clear of published OSV advisories today. That is a snapshot,
-                not a guarantee — the same tree can light up tomorrow without a single line of your
-                code changing.
-              </p>
-            </div>
+            <CleanState title="No known advisories reach this application">
+              Every installed version is clear of published OSV advisories today. That is a
+              snapshot, not a guarantee — the same tree can light up tomorrow without a line of
+              code changing.
+            </CleanState>
           </Panel>
         );
       }
@@ -175,7 +158,7 @@ async function Findings({ slug, appName }: { slug: string; appName: string }) {
             title="Vulnerability blast radius"
             description={`${entries.length} findings across ${groups.length} installed ${
               groups.length === 1 ? "version" : "versions"
-            }; ${transitive} of those versions were never declared by this app.`}
+            }; ${transitive} of those versions were never declared.`}
             action={<ChainLegend />}
           >
             <ul className="divide-y divide-line">
@@ -207,19 +190,13 @@ function FixPointRow({ fix }: { fix: FixPoint }) {
         </div>
         <p className="mt-0.5 text-xs text-ink-muted">
           {fix.isDirect
-            ? "The vulnerable package itself — upgrade it directly."
+            ? "The vulnerable package itself — upgrade in place."
             : `Carries ${fix.affectedVersions.length} vulnerable ${
                 fix.affectedVersions.length === 1 ? "version" : "versions"
               } further down.`}
         </p>
       </div>
-      <div className="flex items-center gap-1.5">
-        {(["CRITICAL", "HIGH", "MODERATE", "LOW"] as const)
-          .filter((severity) => fix.severityCounts[severity] > 0)
-          .map((severity) => (
-            <SeverityBadge key={severity} severity={severity} count={fix.severityCounts[severity]} />
-          ))}
-      </div>
+      <SeverityBadges counts={fix.severityCounts} />
     </li>
   );
 }
@@ -227,9 +204,9 @@ function FixPointRow({ fix }: { fix: FixPoint }) {
 /**
  * One installed version, its path, and every advisory against it.
  *
- * The advisory list is a <details> collapsed by default for anything with more
- * than a couple of findings: the path and the upgrade target are what you act
- * on, and 25 advisory summaries expanded by default would bury them.
+ * The advisory list collapses by default past a couple of findings. The path and
+ * the upgrade target are the actionable parts; two dozen expanded summaries would
+ * bury them.
  */
 function AffectedVersionRow({
   group,
@@ -410,14 +387,3 @@ function FindingsSkeleton() {
   );
 }
 
-function PanelSkeleton({ title, rows }: { title: string; rows: number }) {
-  return (
-    <Panel title={title} description="Loading…">
-      <div className="space-y-3 px-5 py-4">
-        {Array.from({ length: rows }, (_, index) => (
-          <Skeleton key={index} className="h-5 w-full" />
-        ))}
-      </div>
-    </Panel>
-  );
-}

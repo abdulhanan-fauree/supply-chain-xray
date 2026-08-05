@@ -13,28 +13,28 @@ import { withDbFallback } from "@/components/db-error";
 import {
   EmptyState,
   Panel,
+  PanelSkeleton,
   SeverityBadge,
-  Skeleton,
   StatTile,
+  StatTilesSkeleton,
   formatCount,
 } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
+import { PAGE_SIZE } from "@/lib/config";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * Trust concentration: if one npm account were compromised today, how much of
- * this software could that person publish to?
+ * Trust concentration: if one npm account were compromised today, how much of this
+ * software could that person publish to?
  *
- * The most useful question in the application and the least visible one anywhere
- * else. It is not about vulnerabilities — none of these accounts has done
- * anything wrong — it is about how much implicit trust a dependency tree hands to
- * people its owners have never heard of.
+ * Not a list of suspects — none of these accounts has done anything wrong. It
+ * measures how much implicit trust a dependency tree extends to people its owners
+ * have never heard of.
  */
-// Two independent lists on one page, so each needs its own search param.
-const TRUST_PAGE_SIZE = 25;
-const SOLE_PAGE_SIZE = 25;
-
 export default async function MaintainersPage({ searchParams }: PageProps<"/maintainers">) {
   const params = await searchParams;
   return (
@@ -78,7 +78,7 @@ async function Trust({ params }: { params: Record<string, string | string[] | un
       const summary = summariseTrust(rows, totals.packages);
       const transitiveOnly = rows.filter((row) => row.entirelyTransitive).length;
       const deep = rows.filter((row) => row.minDepth >= 4).length;
-      const page = paginate(rows, params.trust as string | undefined, TRUST_PAGE_SIZE);
+      const page = paginate(rows, params.trust as string | undefined, PAGE_SIZE.maintainers);
 
       return (
         <div className="space-y-6">
@@ -183,7 +183,7 @@ async function SoleMaintainers({ params }: { params: Record<string, string | str
     "sole maintainers",
     getSoleMaintainers,
     (rows) => {
-      const page = paginate(rows, params.sole as string | undefined, SOLE_PAGE_SIZE);
+      const page = paginate(rows, params.sole as string | undefined, PAGE_SIZE.soleMaintainers);
       return (
       <Panel
         title="Bus factor of one"
@@ -247,27 +247,13 @@ function SoleRow({ row }: { row: SoleMaintainerRow }) {
 function TrustSkeleton() {
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {Array.from({ length: 4 }, (_, index) => (
-          <div key={index} className="rounded-lg border border-line bg-panel px-4 py-3">
-            <Skeleton className="h-3 w-20" />
-            <Skeleton className="mt-2 h-7 w-14" />
-          </div>
-        ))}
-      </div>
-      <PanelSkeleton title="Publish rights, ranked" rows={10} />
+      <StatTilesSkeleton />
+      <PanelSkeleton
+        title="Publish rights, ranked"
+        description="Joining accounts to installed versions…"
+        rows={10}
+      />
     </div>
   );
 }
 
-function PanelSkeleton({ title, rows }: { title: string; rows: number }) {
-  return (
-    <Panel title={title} description="Joining accounts to installed versions…">
-      <div className="space-y-3 px-5 py-4">
-        {Array.from({ length: rows }, (_, index) => (
-          <Skeleton key={index} className="h-5 w-full" />
-        ))}
-      </div>
-    </Panel>
-  );
-}

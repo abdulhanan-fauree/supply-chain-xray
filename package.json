@@ -11,12 +11,12 @@
     "start": "next start --port 3100",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
     "probe": "tsx --env-file-if-exists=.env.local scripts/probe.ts",
     "crawl": "tsx scripts/crawl.ts",
     "seed": "tsx --env-file-if-exists=.env.local scripts/seed.ts",
     "reseed": "tsx --env-file-if-exists=.env.local scripts/seed.ts --reset",
-    "bench": "tsx --env-file-if-exists=.env.local scripts/bench.ts",
-    "check:licenses": "tsx scripts/checks/licenses.ts"
+    "bench": "tsx --env-file-if-exists=.env.local scripts/bench.ts"
   },
   "dependencies": {
     "neo4j-driver": "^5.28.3",

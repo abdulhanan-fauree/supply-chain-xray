@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
 import {
@@ -9,29 +8,30 @@ import {
   type Dependent,
   type InstalledVersion,
 } from "@/lib/queries/packages";
-import { DbError } from "@/lib/db";
-import { withDbFallback } from "@/components/db-error";
+import { PAGE_SIZE } from "@/lib/config";
+import { loadOrNotFound, withDbFallback } from "@/components/db-error";
 import {
   EmptyState,
   Panel,
+  PanelSkeleton,
   SeverityBadge,
-  Skeleton,
   StatTile,
   formatCount,
 } from "@/components/primitives";
 import { Pagination, paginate } from "@/components/pagination";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * One package: its installed versions, who can publish it, and who pulls it in.
+ * One package: its installed versions, who can publish it, and what pulls it in.
  *
- * The "who depends on this" panel is a single reverse edge walk. Worth noticing
- * how cheap that is here — in a relational schema, answering it in both
- * directions means either a second index on the dependency table or a full scan,
- * and the graph gets it from the same edges either way.
+ * The dependents panel is a single walk against the edge direction. A relational
+ * schema needs a second index to answer that as cheaply as the forward question;
+ * the graph uses the same relationships either way.
  */
-const DEPENDENTS_PAGE_SIZE = 25;
 
 export default async function PackagePage({
   params,
@@ -41,17 +41,9 @@ export default async function PackagePage({
   const query = await searchParams;
   const decoded = decodeURIComponent(name);
 
-  let pkg;
-  try {
-    pkg = await getPackage(decoded);
-  } catch (error) {
-    if (error instanceof DbError) {
-      return withDbFallback("package", async () => null, () => null);
-    }
-    throw error;
-  }
-
-  if (!pkg) notFound();
+  const loaded = await loadOrNotFound("package", () => getPackage(decoded));
+  if ("errorState" in loaded) return loaded.errorState;
+  const pkg = loaded.data;
 
   return (
     <div className="space-y-8">
@@ -232,7 +224,7 @@ async function Dependents({
     "dependents",
     () => getDependents(name),
     (dependents) => {
-      const page = paginate(dependents, query.page as string | undefined, DEPENDENTS_PAGE_SIZE);
+      const page = paginate(dependents, query.page as string | undefined, PAGE_SIZE.dependents);
       return (
       <Panel
         title="What pulls this in"
@@ -290,14 +282,3 @@ function DependentRow({ dependent }: { dependent: Dependent }) {
   );
 }
 
-function PanelSkeleton({ title, rows }: { title: string; rows: number }) {
-  return (
-    <Panel title={title} description="Loading…">
-      <div className="space-y-3 px-5 py-4">
-        {Array.from({ length: rows }, (_, index) => (
-          <Skeleton key={index} className="h-5 w-full" />
-        ))}
-      </div>
-    </Panel>
-  );
-}

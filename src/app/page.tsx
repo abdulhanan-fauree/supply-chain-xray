@@ -7,25 +7,28 @@ import {
   CleanBadge,
   EmptyState,
   Panel,
-  SeverityBadge,
+  SeverityBadges,
   SeverityBar,
   Skeleton,
   StatTile,
+  StatTilesSkeleton,
   formatCount,
 } from "@/components/primitives";
 
 /**
  * The dashboard.
  *
- * A server component: the query runs on the server, the driver never reaches the
- * browser, and the page streams. The two data regions are suspended separately,
- * so the cheap totals paint while the portfolio query is still running rather
- * than the whole page waiting on the slowest one.
+ * A server component, so the driver never reaches the browser. The two data
+ * regions are suspended separately: the cheap totals paint while the portfolio
+ * query is still running, rather than the page waiting on the slowest one.
  */
 
-// The graph only changes when the seed script runs, so serving a cached render
-// for a minute is honest rather than a shortcut — and it keeps the free tier's
-// half a vCPU from re-running the same traversal for every visitor.
+// The graph changes only when the seed script runs, so a short cache window is
+// accurate rather than a shortcut, and it keeps a burstable instance from
+// re-running the same traversal for every visitor.
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 export default function DashboardPage() {
@@ -35,12 +38,12 @@ export default function DashboardPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Dependency risk overview</h1>
         <p className="mt-1.5 max-w-2xl text-sm text-ink-muted">
           Six applications, their full production install trees, and every published advisory that
-          reaches them. Pick an application to trace a vulnerability back to the one dependency you
-          actually control.
+          reaches them. Open an application to trace a vulnerability back to the single declared
+          dependency responsible for it.
         </p>
       </div>
 
-      <Suspense fallback={<TotalsSkeleton />}>
+      <Suspense fallback={<StatTilesSkeleton count={5} />}>
         <Totals />
       </Suspense>
 
@@ -139,17 +142,7 @@ function AppRow({ row }: { row: PortfolioRow }) {
             <CleanBadge>no known advisories</CleanBadge>
           ) : (
             <>
-              <div className="flex flex-wrap items-center gap-1.5">
-                {(["CRITICAL", "HIGH", "MODERATE", "LOW"] as const)
-                  .filter((severity) => row.severityCounts[severity] > 0)
-                  .map((severity) => (
-                    <SeverityBadge
-                      key={severity}
-                      severity={severity}
-                      count={row.severityCounts[severity]}
-                    />
-                  ))}
-              </div>
+              <SeverityBadges counts={row.severityCounts} />
               <span className="text-xs text-ink-faint">
                 across {row.vulnerableVersions}{" "}
                 {row.vulnerableVersions === 1 ? "version" : "versions"}
@@ -159,7 +152,7 @@ function AppRow({ row }: { row: PortfolioRow }) {
 
           <span className="ml-auto text-xs text-ink-faint">
             <span className="tnum font-medium text-ink-muted">{indirectShare}%</span> of the tree was
-            never chosen directly
+            never declared
           </span>
         </div>
 
@@ -189,19 +182,6 @@ function Metric({
         {suffix && <span className="ml-1 text-xs font-normal text-ink-faint">{suffix}</span>}
       </div>
       <div className="mt-1 text-[11px] uppercase tracking-wide text-ink-faint">{label}</div>
-    </div>
-  );
-}
-
-function TotalsSkeleton() {
-  return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-      {Array.from({ length: 5 }, (_, index) => (
-        <div key={index} className="rounded-lg border border-line bg-panel px-4 py-3">
-          <Skeleton className="h-3 w-16" />
-          <Skeleton className="mt-2 h-7 w-12" />
-        </div>
-      ))}
     </div>
   );
 }

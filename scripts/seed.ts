@@ -1,23 +1,19 @@
 /**
  * Loads data/graph.json into CognoDB.
  *
- * Run:  npm run seed            (idempotent — safe to re-run)
- *       npm run seed -- --reset (wipe the graph first)
+ *   npm run seed            idempotent, safe to re-run
+ *   npm run reseed          wipe the graph first
  *
- * Design notes:
+ * Reads the committed dataset and never the network, so a registry outage cannot
+ * leave a half-written graph and seeding works offline.
  *
- *   - Reads the committed dataset, never the network. Building the dataset and
- *     loading it are separate steps so a registry outage cannot leave a
- *     half-written graph, and a reviewer with no network can still seed.
+ * Every write is a MERGE, so re-running converges rather than duplicating; the
+ * uniqueness constraints in schema.ts are what make that both correct and fast,
+ * and they are created before any data is written.
  *
- *   - Everything is MERGE, so re-running converges rather than duplicating. The
- *     uniqueness constraints in schema.ts are what make that both correct and
- *     fast; they are created before any data is written.
- *
- *   - Every statement is a static string with an $rows parameter carrying a
- *     batch of plain objects. No Cypher is ever assembled from data. Batches are
- *     500 rows because the free c0 instance has 256 MB of RAM and a large UNWIND
- *     builds its whole intermediate result in memory.
+ * Every statement is a static string taking an $rows parameter that carries a
+ * batch of plain objects, so no Cypher is assembled from data. Batch size comes
+ * from LOAD_BATCH_SIZE — see the note there on instance memory.
  */
 
 import { readFileSync } from "node:fs";
@@ -26,10 +22,9 @@ import type { Driver, Session } from "neo4j-driver";
 
 import { createStandaloneDriver } from "../src/lib/db";
 import { describeConnection, requireEnv } from "../src/lib/env";
+import { LOAD_BATCH_SIZE } from "../src/lib/config";
 import { CONSTRAINTS, INDEXES, OWNED_LABELS } from "./lib/schema";
 import type { GraphDataset } from "../src/lib/model";
-
-const BATCH_SIZE = 500;
 
 type Step = {
   label: string;
@@ -129,9 +124,8 @@ function buildSteps(data: GraphDataset): Step[] {
         SET u.range = row.range, u.dev = row.dev`,
     },
     {
-      // The materialised closure. See ReachesEdge in model.ts for why it exists:
-      // asked live, one shortestPath per (app, dependency) pair times out at 20s
-      // on the free instance; one BFS sweep in the crawler is microseconds.
+      // The materialised closure; see ReachesEdge in model.ts for why it exists
+      // and what it deliberately leaves to live traversal.
       label: "REACHES",
       rows: data.reaches as unknown as Record<string, unknown>[],
       cypher: `
@@ -203,11 +197,11 @@ async function wipe(session: Session): Promise<void> {
   process.stdout.write("Reset\n");
   for (const label of OWNED_LABELS) {
     let total = 0;
-    // Batched so the delete itself cannot exhaust 256 MB of instance memory.
+    // Batched so the delete itself cannot exhaust the instance's memory.
     for (;;) {
       const result = await session.run(
         `MATCH (n:${label}) WITH n LIMIT $limit DETACH DELETE n RETURN count(n) AS deleted`,
-        { limit: BATCH_SIZE },
+        { limit: LOAD_BATCH_SIZE },
       );
       const deleted = (result.records[0]?.get("deleted") as number) ?? 0;
       total += deleted;
@@ -226,8 +220,8 @@ async function runStep(driver: Driver, database: string, step: Step): Promise<vo
   const started = Date.now();
   let created = 0;
 
-  for (let offset = 0; offset < step.rows.length; offset += BATCH_SIZE) {
-    const batch = step.rows.slice(offset, offset + BATCH_SIZE);
+  for (let offset = 0; offset < step.rows.length; offset += LOAD_BATCH_SIZE) {
+    const batch = step.rows.slice(offset, offset + LOAD_BATCH_SIZE);
     const session = driver.session({ database });
     try {
       const result = await session.executeWrite((tx) => tx.run(step.cypher, { rows: batch }));

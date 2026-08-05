@@ -9,17 +9,15 @@
  *      packages the full document can run to tens of megabytes — which is why
  *      the graph carries "releases behind latest" instead of publish dates.
  *
- *   2. The version document (`/<pkg>/<version>`) carries the license for *that*
- *      version. This matters: `legacy-admin` pins versions from 2019, and a
- *      package's license can change between releases. Reading the license off
- *      the latest version would quietly give the wrong answer for exactly the
- *      app the license query is most interesting about.
+ *   2. The version document (`/<pkg>/<version>`) carries the licence for *that*
+ *      version. A package's licence can change between releases, and the
+ *      applications pinning old releases are exactly the ones the licence query
+ *      is about, so reading it off the latest version would give the wrong
+ *      answer where it matters most.
  *
  *   3. `/<pkg>/latest` carries the *current* maintainer list, description and
- *      repository. Deliberately current rather than historical: the trust
- *      concentration query asks "if this account were compromised today, how
- *      much of my tree could they publish to", which is a question about who
- *      holds the keys now, not who held them when an old version shipped.
+ *      repository. Current rather than historical by design: the trust query
+ *      asks who could publish today, not who could when an old version shipped.
  */
 
 import { fetchJson, mapLimit } from "./http";
@@ -144,29 +142,25 @@ export function normaliseLicense(doc: VersionDoc | null): string {
 }
 
 /**
- * Bucket a license by the obligation it imposes on someone distributing an app
- * that links it. This is the axis the contamination query cares about — an
- * AGPL dependency four hops down a web app is a genuine legal event; an
- * Apache-2.0 one is not.
+ * Bucket a licence by the obligation it imposes on whoever distributes software
+ * that links it. That is the axis the obligations query reports on: an AGPL
+ * dependency four hops down a web application is a legal event, an Apache-2.0 one
+ * is not.
  */
 export function categoriseLicense(spdxId: string): LicenseCategory {
   const id = spdxId.trim().toUpperCase().replace(/^\(|\)$/g, "");
   if (id === "UNKNOWN" || id === "" || /^SEE LICENSE/.test(id)) return "unknown";
 
-  // SPDX expressions have to be decomposed, not pattern-matched whole.
+  // SPDX expressions are decomposed rather than pattern-matched whole, because
+  // the two operators mean opposite things. "(BSD-3-Clause OR GPL-2.0)" is a
+  // choice — the licensee may take the BSD side and incur no copyleft obligation
+  // — so the least restrictive operand governs. "AND" binds every operand at
+  // once, so the most restrictive one does.
   //
-  // "(BSD-3-Clause OR GPL-2.0)" is a *choice*: the licensee may take the BSD
-  // side and incur no copyleft obligation at all, so the permissive reading is
-  // the correct one. Matching the raw string would have flagged node-forge as
-  // copyleft in every license report this app produces — a false positive in
-  // the direction that wastes a lawyer's afternoon.
-  //
-  // "AND" is the opposite: every listed license binds simultaneously, so the
-  // most restrictive operand governs.
-  // Operators must be whitespace-delimited, not word-boundary-delimited: a
-  // hyphen counts as a word boundary, so \bOR\b happily matches the "or" inside
-  // "LGPL-3.0-or-later" and shreds it into "LGPL-3.0-" and "-later", both
-  // unrecognisable. That silently downgraded every LGPL dependency to "unknown".
+  // Operators are whitespace-delimited, not word-boundary-delimited: a hyphen is
+  // a word boundary, so a \bOR\b pattern matches the "or" inside
+  // "LGPL-3.0-or-later" and splits it into unrecognisable fragments. Both cases
+  // are covered by tests/licenses.test.ts.
   if (/\s+OR\s+/.test(id)) {
     return leastRestrictive(id.split(/\s+OR\s+/).map(categoriseLicense));
   }
@@ -179,8 +173,8 @@ export function categoriseLicense(spdxId: string): LicenseCategory {
   if (/GPL-[23]/.test(id)) return "copyleft";
   if (/MPL|EPL|CDDL|EUPL|OSL/.test(id)) return "weak-copyleft";
   if (/UNLICENSED|PROPRIETARY|COMMERCIAL/.test(id)) return "proprietary";
-  // CC-BY requires attribution but imposes no source obligation, so for the
-  // purpose of "may I ship this", it belongs with the permissive licenses.
+  // CC-BY requires attribution but imposes no source obligation, so against the
+  // question this categorisation answers it belongs with the permissive set.
   if (/MIT|APACHE|BSD|ISC|UNLICENSE|CC0|CC-BY|WTFPL|ZLIB|PYTHON|ARTISTIC|BLUEOAK|POSTGRE/.test(id)) {
     return "permissive";
   }

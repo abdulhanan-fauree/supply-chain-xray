@@ -1,22 +1,29 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
 import { getExposedApps, getVulnerability, type ExposedApp } from "@/lib/queries/vulnerabilities";
-import { DbError } from "@/lib/db";
-import { withDbFallback } from "@/components/db-error";
+import { loadOrNotFound, withDbFallback } from "@/components/db-error";
 import { ChainLegend, DependencyChain } from "@/components/dependency-chain";
-import { EmptyState, Panel, SeverityBadge, Skeleton, StatTile } from "@/components/primitives";
+import {
+  EmptyState,
+  Panel,
+  SeverityBadge,
+  Skeleton,
+  StatTile,
+  StatTilesSkeleton,
+} from "@/components/primitives";
+import { packageNameOf } from "@/lib/version-id";
 
+// Next.js requires route segment config to be a statically analysable literal, so
+// this cannot be imported from lib/config. Keep the value in step with the note
+// on caching there.
 export const revalidate = 60;
 
 /**
- * One advisory, and the reverse blast radius: who is exposed and by what path.
+ * One advisory and the reverse blast radius: who is exposed, and by what path.
  *
- * The same edges as the application page, walked the other way. Nothing was added
- * to the model to make this direction possible, which is the point — in a
- * relational schema "which apps does this CVE reach" and "which CVEs reach this
- * app" are two different recursive queries.
+ * The same relationships as the application page, walked the other way. Nothing
+ * was added to the model to make this direction possible.
  */
 export default async function VulnerabilityPage({
   params,
@@ -24,17 +31,9 @@ export default async function VulnerabilityPage({
   const { osvId } = await params;
   const decoded = decodeURIComponent(osvId);
 
-  let advisory;
-  try {
-    advisory = await getVulnerability(decoded);
-  } catch (error) {
-    if (error instanceof DbError) {
-      return withDbFallback("advisory", async () => null, () => null);
-    }
-    throw error;
-  }
-
-  if (!advisory) notFound();
+  const loaded = await loadOrNotFound("advisory", () => getVulnerability(decoded));
+  if ("errorState" in loaded) return loaded.errorState;
+  const advisory = loaded.data;
 
   return (
     <div className="space-y-8">
@@ -159,7 +158,7 @@ function ExposedRow({ row }: { row: ExposedApp }) {
           <p className="mt-1 text-xs text-ink-muted">
             {row.depth === 1
               ? "Declared directly — upgrade it in place."
-              : `Inherited ${row.depth} hops down. Bump ${row.entryPoint.split("@").slice(0, -1).join("@")} to clear it.`}
+              : `Inherited ${row.depth} hops down. Bump ${packageNameOf(row.entryPoint)} to clear it.`}
           </p>
         </div>
         <div className="shrink-0 text-right text-xs">
@@ -179,14 +178,7 @@ function ExposedRow({ row }: { row: ExposedApp }) {
 function ExposureSkeleton() {
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {Array.from({ length: 4 }, (_, index) => (
-          <div key={index} className="rounded-lg border border-line bg-panel px-4 py-3">
-            <Skeleton className="h-3 w-16" />
-            <Skeleton className="mt-2 h-7 w-12" />
-          </div>
-        ))}
-      </div>
+      <StatTilesSkeleton />
       <Panel title="Who is exposed" description="Walking every tree in reverse…">
         <ul className="divide-y divide-line">
           {Array.from({ length: 3 }, (_, index) => (

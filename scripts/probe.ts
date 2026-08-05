@@ -2,15 +2,15 @@
  * CognoDB capability probe.
  *
  * CognoDB speaks openCypher over Bolt and works with the official Neo4j driver,
- * but it is not Neo4j — so before committing the data model and query layer to a
- * feature, we check that the feature actually exists. Every capability this app
- * relies on is listed below; the report is pasted into the README so a reviewer
- * can see exactly which ground we stand on.
+ * but it is a reimplementation rather than Neo4j. Every Cypher feature the data
+ * model and query layer depend on is verified here against a live instance before
+ * anything is built on it, and the results are written to
+ * docs/cognodb-capabilities.md.
  *
- * Run:  npm run probe
+ *   npm run probe
  *
- * Safe to run against a live instance: everything it writes is labelled
- * :__Probe and deleted in the final step, even if earlier checks fail.
+ * Safe against a live instance: everything it writes carries the :__Probe label
+ * and is deleted in a finally block, even if earlier checks fail.
  */
 
 import { createStandaloneDriver } from "../src/lib/db";
@@ -24,9 +24,8 @@ type Check = {
   /** Why the application cares. Appears in the report. */
   why: string;
   /**
-   * Set when the *expected* outcome is a failure — a documented divergence or a
-   * feature we want to prove is absent. These do not count against the run, but
-   * if one starts passing that is news worth seeing.
+   * Set when the intended outcome is failure. These do not count against the
+   * run, but a change in either direction is worth surfacing.
    */
   expectFailure?: boolean;
   run: (session: Session) => Promise<string>;
@@ -35,9 +34,10 @@ type Check = {
 const PROBE_LABEL = "__Probe";
 
 /**
- * PASS/FAIL mean what you expect. AS-EXPECTED is a check that was *supposed* to
- * fail — a documented divergence or an absent feature we rely on being absent.
- * SURPRISE is one of those starting to pass, which is worth reading about.
+ * PASS and FAIL are literal. AS-EXPECTED marks a check whose intended outcome is
+ * failure — a documented divergence, or a feature whose absence the application
+ * relies on. SURPRISE marks one of those beginning to pass, which means a
+ * workaround may no longer be needed.
  */
 type Status = "PASS" | "FAIL" | "AS-EXPECTED" | "SURPRISE";
 
@@ -74,7 +74,7 @@ const checks: Check[] = [
   },
   {
     name: "Server identity",
-    why: "Records the Bolt protocol version we are actually negotiating.",
+    why: "Records the Bolt protocol version actually negotiated.",
     run: async (session) => {
       const summary = (await session.run("RETURN 1")).summary;
       const agent = summary.server.agent ?? "unknown agent";
@@ -148,7 +148,7 @@ const checks: Check[] = [
   },
   {
     name: "Variable-length traversal",
-    why: "Blast radius is a *1..8 pattern. This is the single most important capability in the app.",
+    why: "Blast radius is a *1..8 pattern — the single most important capability the application needs.",
     run: async (session) => {
       const result = await session.run(
         `MATCH (start:${PROBE_LABEL} {key: $startKey})
@@ -163,13 +163,13 @@ const checks: Check[] = [
     name: "Edge-property filter inside a traversal",
     why: "Optional dependencies must be excluded partway through a walk, not after it, so 'what if optional deps are not installed' is answerable.",
     run: async (session) => {
-      // Note the named path and relationships(p). See the next check for why
-      // the more familiar Neo4j spelling is not used anywhere in this codebase.
+      // Note the named path and relationships(p); the next check documents why
+      // the more familiar Neo4j spelling is unusable here.
       //
       // The probe chain flags exactly one edge, probe-3 -> probe-4, so a working
-      // filter reaches probe-1..probe-3 and stops: 3 nodes, against 8 unfiltered.
-      // Asserting the number matters — a filter that silently matched nothing
-      // would also "succeed" if we only checked that the query ran.
+      // filter reaches probe-1 through probe-3 and stops: 3 nodes against 8
+      // unfiltered. The count is asserted because a filter matching nothing would
+      // also "succeed" if the check only confirmed that the query ran.
       const expected = 3;
       const result = await session.run(
         `MATCH p = (start:${PROBE_LABEL} {key: $startKey})-[:PROBE_DEPENDS_ON*1..8]->(reached)
@@ -190,9 +190,9 @@ const checks: Check[] = [
     expectFailure: true,
     run: async (session) => {
       // In Neo4j, `-[rels:TYPE*1..8]->` binds rels to a list of relationships.
-      // CognoDB binds it to a Path, so none()/size()/any() over it error with
+      // CognoDB binds it to a Path, so none(), size() and any() over it fail with
       // "requires list, got *types.Path". The fix is to name the path and call
-      // relationships(p) — verified working in the check above. This check is
+      // relationships(p), verified in the check above. This check is
       // kept deliberately failing so the divergence stays documented and a
       // future CognoDB release that fixes it shows up as a passing row.
       await session.run(
@@ -280,7 +280,7 @@ const checks: Check[] = [
   },
   {
     name: "APOC availability",
-    why: "Expected to be absent. Confirming it lets us guarantee the app is pure openCypher.",
+    why: "Expected to be absent. Its absence is what makes the application provably pure openCypher.",
     expectFailure: true,
     run: async (session) => {
       await session.run("RETURN apoc.version() AS version");
