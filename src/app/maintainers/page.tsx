@@ -162,7 +162,7 @@ function TrustRowView({ row }: { row: TrustRow }) {
           </div>
           <div className="mt-1 text-[11px] uppercase tracking-wide text-ink-faint">depth</div>
         </div>
-        <div className="hidden w-32 flex-wrap gap-1 sm:flex">
+        <div className="hidden w-56 flex-wrap gap-1 sm:flex">
           {row.appSlugs.slice(0, 3).map((slug) => (
             <Link
               key={slug}

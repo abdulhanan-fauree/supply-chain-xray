@@ -185,3 +185,22 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * Page shell.
+ *
+ * Two competing constraints: data-dense panels want width, and prose does not —
+ * a line of text past roughly 80 characters is measurably harder to read. So the
+ * shell is generous and the *text inside it* is capped separately, rather than
+ * throttling every panel to keep paragraphs narrow.
+ *
+ * 88rem lands near the full width of a 1440px laptop and leaves a wide display
+ * looking deliberate rather than abandoned. Going edge-to-edge would put the
+ * first and last column of a table a screen apart.
+ */
+.shell {
+  width: 100%;
+  max-width: 88rem;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+}
