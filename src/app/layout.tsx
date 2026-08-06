@@ -15,7 +15,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" className="h-full">
       <body className="flex min-h-full flex-col">
         <header className="sticky top-0 z-10 border-b border-line bg-bg/85 backdrop-blur">
-          <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3">
+          <div className="shell flex items-center gap-6 py-3">
             <Link href="/" className="flex items-center gap-2.5 font-semibold tracking-tight">
               <span
                 aria-hidden="true"
@@ -29,10 +29,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           </div>
         </header>
 
-        <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
+        <main className="shell flex-1 py-8">{children}</main>
 
         <footer className="border-t border-line">
-          <div className="mx-auto max-w-6xl px-6 py-5 text-xs text-ink-faint">
+          <div className="shell py-5 text-xs text-ink-faint">
             Dependency and advisory data from{" "}
             <a
               className="text-ink-muted underline decoration-line underline-offset-2 hover:text-ink"

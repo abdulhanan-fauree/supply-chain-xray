@@ -122,7 +122,11 @@ export function Panel({
       <header className="flex flex-wrap items-start justify-between gap-4 border-b border-line px-5 py-4">
         <div>
           <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-          {description && <p className="mt-0.5 text-xs text-ink-muted">{description}</p>}
+          {/* Capped so a description never spans the full shell, but wide
+              enough that a one-line sentence stays on one line at this size. */}
+          {description && (
+            <p className="mt-0.5 max-w-5xl text-xs text-ink-muted">{description}</p>
+          )}
         </div>
         {action}
       </header>
